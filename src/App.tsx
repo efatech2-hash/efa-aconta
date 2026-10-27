@@ -637,6 +637,11 @@ export default function App() {
       console.warn('Erreur clear storage:', e);
     }
 
+    // Invalidation du token d'authentification Supabase
+    try {
+      supabase.auth.signOut().catch(() => {});
+    } catch {}
+
     setPatron(null);
     setCurrentUser(null);
     setEmployes([]);
@@ -653,6 +658,13 @@ export default function App() {
   }, []);
 
   const handleNavigate = useCallback((tab: 'home' | 'vendre' | 'mon-argent' | 'stock' | 'ajouter' | 'employes' | 'ambassadrice' | 'mes-ventes' | 'historique' | 'mon-abonnement' | 'mes-boutiques') => {
+    // SÉCURITÉ FORTERESSE : Garde de rôle strict (IDOR Prevention)
+    const isPatronOnlyTab = ['mon-argent', 'stock', 'ajouter', 'employes', 'ambassadrice', 'historique', 'mon-abonnement', 'mes-boutiques'].includes(tab);
+    if (isPatronOnlyTab && currentUser && currentUser.role !== 'patron') {
+      showToast('Accès restreint au compte Patron uniquement', 'warning');
+      setActiveTab('vendre');
+      return;
+    }
     setActiveTab(tab);
     if (typeof window !== 'undefined') {
       if (tab === 'ambassadrice') window.history.pushState({}, '', '/ambassadrice');
@@ -660,7 +672,7 @@ export default function App() {
       else if (tab === 'mes-boutiques') window.history.pushState({}, '', '/mes-boutiques');
       else if (tab === 'home') window.history.pushState({}, '', '/');
     }
-  }, []);
+  }, [currentUser, showToast]);
 
   const triggerPostActionPrompt = () => { if (patron?.auto_logout_after_action !== false) setIsAutoLogoutPromptOpen(true); };
 

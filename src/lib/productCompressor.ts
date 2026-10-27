@@ -3,6 +3,8 @@
  * Compression d'images produits avant envoi vers Supabase Storage bucket 'efa-aconta-produits'
  */
 
+import { validateImageFile } from './security';
+
 export type ProductPlan = 'gratuit' | 'payant' | 'pro';
 
 export interface PlanCompressionConfig {
@@ -78,6 +80,14 @@ export async function compressProductImage(
   file: File,
   plan: ProductPlan = 'gratuit'
 ): Promise<File> {
+  // Sécurité Forteresse : vérification stricte du format et des magic bytes réels
+  if (file && typeof file.slice === 'function') {
+    const validation = await validateImageFile(file);
+    if (!validation.valid) {
+      throw new Error(validation.error || 'Fichier rejeté : format non sécurisé');
+    }
+  }
+
   const config = PLAN_COMPRESSION_CONFIGS[plan] || PLAN_COMPRESSION_CONFIGS.gratuit;
   const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
   const targetFileName = `${fileNameWithoutExt || 'produit'}.webp`;

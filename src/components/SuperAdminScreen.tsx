@@ -101,8 +101,37 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     setTimeout(() => setToast(null), 3500);
   };
 
+  const adminFetch = (url: string, options: RequestInit = {}) => {
+    const token = typeof window !== 'undefined' ? (localStorage.getItem('efa_admin_token') || '') : '';
+    const headers = new Headers(options.headers || {});
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+      headers.set('x-admin-token', token);
+    }
+    return fetch(url, { ...options, headers });
+  };
+
   useEffect(() => {
-    console.log("Route super admin chargée");
+    // Vérification de validité du token admin au chargement
+    const token = typeof window !== 'undefined' ? localStorage.getItem('efa_admin_token') : null;
+    if (isAuthenticated && token) {
+      fetch('/api/admin/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data.success) {
+            handleLogout();
+          }
+        })
+        .catch(() => {
+          // Si le serveur est temporairement inaccessible, garder la session
+        });
+    } else if (isAuthenticated && !token) {
+      handleLogout();
+    }
   }, []);
 
   // Numéro WhatsApp Super Admin depuis variable d'environnement ou fallback
@@ -122,8 +151,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     const emailInput = adminEmail.trim().toLowerCase();
     const passwordInput = adminPassword.trim();
 
-    // 1. Tenter via API backend /api/admin/login
-    let loginOk = false;
     try {
       const resp = await fetch('/api/admin/login', {
         method: 'POST',
@@ -131,50 +158,32 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         body: JSON.stringify({ email: emailInput, password: passwordInput }),
       });
       const data = await resp.json();
-      if (resp.ok && data.success) {
-        loginOk = true;
-        if (data.token) {
-          localStorage.setItem('efa_admin_token', data.token);
-        }
+      if (resp.ok && data.success && data.token) {
+        localStorage.setItem('efa_admin_token', data.token);
+        setIsAuthenticated(true);
+        localStorage.setItem('efa_super_admin_logged', 'true');
+        localStorage.setItem('efa_super_admin_email', emailInput);
+        showToast('Connexion Super Admin réussie !', 'success');
+        loadBoutiques();
+        return;
       }
+      setLoginError(data.error || 'Email ou mot de passe incorrect. Accès refusé.');
     } catch {
-      // Backend non disponible ou dev mode direct
-    }
-
-    // 2. Vérification avec import.meta.env.VITE_SUPER_ADMIN_EMAIL et VITE_SUPER_ADMIN_PASSWORD
-    if (!loginOk) {
-      const expectedEmail = (
-        import.meta.env.VITE_SUPER_ADMIN_EMAIL ||
-        (typeof process !== 'undefined' && process.env?.SUPER_ADMIN_EMAIL) ||
-        'efatech2@gmail.com'
-      )
-        .trim()
-        .toLowerCase();
-      const expectedPassword = (
-        import.meta.env.VITE_SUPER_ADMIN_PASSWORD ||
-        (typeof process !== 'undefined' && process.env?.SUPER_ADMIN_PASSWORD) ||
-        '2hcetafe'
-      ).trim();
-
-      if (emailInput === expectedEmail && passwordInput === expectedPassword) {
-        loginOk = true;
-      }
-    }
-
-    setIsLoggingIn(false);
-
-    if (loginOk) {
-      setIsAuthenticated(true);
-      localStorage.setItem('efa_super_admin_logged', 'true');
-      localStorage.setItem('efa_super_admin_email', emailInput);
-      showToast('Connexion Super Admin réussie !', 'success');
-      loadBoutiques();
-    } else {
-      setLoginError('Email ou mot de passe incorrect. Accès refusé.');
+      setLoginError('Serveur de sécurité indisponible. Veuillez vérifier votre connexion.');
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
   const handleLogout = () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('efa_admin_token') : null;
+    if (token) {
+      fetch('/api/admin/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      }).catch(() => {});
+    }
     setIsAuthenticated(false);
     localStorage.removeItem('efa_super_admin_logged');
     localStorage.removeItem('efa_admin_token');
@@ -188,16 +197,19 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   const loadBoutiques = async () => {
     setIsLoadingData(true);
     try {
-      // 1. Tenter par l'API backend
+      // 1. Tenter par l'API backend sécurisée avec token
       let loadedFromApi = false;
       try {
-        const resp = await fetch('/api/admin/boutiques');
+        const resp = await adminFetch('/api/admin/boutiques');
         if (resp.ok) {
           const data = await resp.json();
           if (data.success && Array.isArray(data.boutiques)) {
             setBoutiques(data.boutiques);
             loadedFromApi = true;
           }
+        } else if (resp.status === 401) {
+          handleLogout();
+          return;
         }
       } catch {}
 
@@ -380,9 +392,9 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     const targetStatus = planCode.startsWith('pro') ? 'pro' : 'populaire';
 
     try {
-      // 1. Tenter par l'API backend
+      // 1. Tenter par l'API backend sécurisée
       try {
-        await fetch('/api/admin/boutiques/activate', {
+        await adminFetch('/api/admin/boutiques/activate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -493,7 +505,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     const newActiveState = !boutique.is_active;
     try {
       try {
-        await fetch('/api/admin/boutiques/toggle-status', {
+        await adminFetch('/api/admin/boutiques/toggle-status', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ boutique_id: boutique.id, is_active: newActiveState }),
@@ -589,7 +601,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
       // 4. Update Backend API
       try {
-        await fetch('/api/admin/boutiques/prolong', {
+        await adminFetch('/api/admin/boutiques/prolong', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -643,7 +655,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
     try {
       try {
-        await fetch(`/api/admin/boutiques/${boutique.id}`, { method: 'DELETE' });
+        await adminFetch(`/api/admin/boutiques/${boutique.id}`, { method: 'DELETE' });
       } catch {}
 
       await supabase.from('efa_boutiques').delete().eq('id', boutique.id);

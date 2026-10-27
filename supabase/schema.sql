@@ -198,13 +198,42 @@ CREATE TABLE IF NOT EXISTS public.efa_devices (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 15. Table aconta_produits (Projet Isolé EFA ACONTA)
+CREATE TABLE IF NOT EXISTS public.aconta_produits (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    nom TEXT NOT NULL,
+    photo_url TEXT,
+    prix_achat NUMERIC DEFAULT 0,
+    prix_vente NUMERIC NOT NULL DEFAULT 0,
+    stock_qte INTEGER NOT NULL DEFAULT 0,
+    seuil_alerte INTEGER DEFAULT 5,
+    categorie TEXT DEFAULT 'Général',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 16. Table factures
+CREATE TABLE IF NOT EXISTS public.factures (
+    id TEXT PRIMARY KEY,
+    patron_id TEXT NOT NULL,
+    numero_facture TEXT NOT NULL,
+    client_nom TEXT,
+    client_telephone TEXT,
+    montant_total NUMERIC NOT NULL DEFAULT 0,
+    statut TEXT DEFAULT 'payee',
+    lignes_articles JSONB DEFAULT '[]'::jsonb,
+    creee_le TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ==============================================================================
 -- ACTIVATION DE ROW LEVEL SECURITY (RLS) SUR CHAQUE TABLE
 -- ==============================================================================
 ALTER TABLE public.patrons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.produits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.aconta_produits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ventes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.factures ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.depenses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.credits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.historique_actions ENABLE ROW LEVEL SECURITY;
@@ -217,19 +246,84 @@ ALTER TABLE public.efa_vendeurs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.efa_devices ENABLE ROW LEVEL SECURITY;
 
 -- ==============================================================================
--- POLITIQUES RLS POUR ACCÈS ANONYME / AUTHENTIFIÉ (APPLICATION EFA ACONTA)
+-- POLITIQUES RLS SÉCURISÉES (FORTERESSE : AUTH.UID() & SERVICE ROLE)
 -- ==============================================================================
-CREATE POLICY "Allow all on patrons" ON public.patrons FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on employes" ON public.employes FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on produits" ON public.produits FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on ventes" ON public.ventes FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on depenses" ON public.depenses FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on credits" ON public.credits FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on historique_actions" ON public.historique_actions FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on parrainage" ON public.parrainage FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on abonnements" ON public.abonnements FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on subscriptions" ON public.subscriptions FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on boutiques" ON public.boutiques FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on efa_boutiques" ON public.efa_boutiques FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on efa_vendeurs" ON public.efa_vendeurs FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on efa_devices" ON public.efa_devices FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "patrons_owner_policy" ON public.patrons
+    FOR ALL USING (auth.uid()::text = id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = id OR auth.role() = 'service_role');
+
+CREATE POLICY "employes_owner_policy" ON public.employes
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.uid()::text = id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "produits_store_policy" ON public.produits
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.uid()::text IN (SELECT patron_id FROM public.employes WHERE id = auth.uid()::text) OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.uid()::text IN (SELECT patron_id FROM public.employes WHERE id = auth.uid()::text) OR auth.role() = 'service_role');
+
+CREATE POLICY "aconta_produits_owner_policy" ON public.aconta_produits
+    FOR ALL USING (auth.uid()::text = user_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = user_id OR auth.role() = 'service_role');
+
+CREATE POLICY "ventes_store_policy" ON public.ventes
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.uid()::text IN (SELECT patron_id FROM public.employes WHERE id = auth.uid()::text) OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.uid()::text IN (SELECT patron_id FROM public.employes WHERE id = auth.uid()::text) OR auth.role() = 'service_role');
+
+CREATE POLICY "factures_store_policy" ON public.factures
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.uid()::text IN (SELECT patron_id FROM public.employes WHERE id = auth.uid()::text) OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "depenses_store_policy" ON public.depenses
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "credits_store_policy" ON public.credits
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "historique_store_policy" ON public.historique_actions
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "parrainage_owner_policy" ON public.parrainage
+    FOR ALL USING (auth.uid()::text = parrain_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = parrain_id OR auth.role() = 'service_role');
+
+CREATE POLICY "abonnements_owner_policy" ON public.abonnements
+    FOR SELECT USING (auth.uid()::text = entreprise_id OR auth.role() = 'service_role');
+
+CREATE POLICY "subscriptions_owner_policy" ON public.subscriptions
+    FOR SELECT USING (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "boutiques_owner_policy" ON public.boutiques
+    FOR ALL USING (auth.uid()::text = patron_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+
+CREATE POLICY "efa_boutiques_owner_policy" ON public.efa_boutiques
+    FOR ALL USING (auth.uid()::text = id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = id OR auth.role() = 'service_role');
+
+CREATE POLICY "efa_vendeurs_owner_policy" ON public.efa_vendeurs
+    FOR ALL USING (auth.uid()::text = boutique_id OR auth.uid()::text = id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = boutique_id OR auth.role() = 'service_role');
+
+CREATE POLICY "efa_devices_owner_policy" ON public.efa_devices
+    FOR ALL USING (auth.uid()::text = boutique_id OR auth.role() = 'service_role')
+    WITH CHECK (auth.uid()::text = boutique_id OR auth.role() = 'service_role');
+
+-- RLS STORAGE BUCKET 'efa-aconta-produits'
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Public can view product images" ON storage.objects
+    FOR SELECT USING (bucket_id = 'efa-aconta-produits');
+
+CREATE POLICY "Owner can upload own product images" ON storage.objects
+    FOR INSERT WITH CHECK (
+        bucket_id = 'efa-aconta-produits' AND
+        ((storage.foldername(name))[1] = auth.uid()::text OR auth.role() = 'service_role')
+    );
+
+CREATE POLICY "Owner can delete own product images" ON storage.objects
+    FOR DELETE USING (
+        bucket_id = 'efa-aconta-produits' AND
+        ((storage.foldername(name))[1] = auth.uid()::text OR auth.role() = 'service_role')
+    );

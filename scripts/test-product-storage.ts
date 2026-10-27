@@ -58,9 +58,18 @@ async function runStorageOptimizationTests() {
   // =========================================================================
   console.log('--- 1. TEST COMPRESSION FICHIER 5 MB (PLAN GRATUIT) ---');
 
-  // Simulation d'un fichier volumineux de 5 MB (5 242 880 octets)
+  // Simulation d'un fichier volumineux de 5 MB (5 242 880 octets) avec en-tête PNG valide
   const fiveMbBytes = 5 * 1024 * 1024;
   const rawBigBuffer = new Uint8Array(fiveMbBytes);
+  // PNG Magic Bytes: 89 50 4E 47 0D 0A 1A 0A
+  rawBigBuffer[0] = 0x89;
+  rawBigBuffer[1] = 0x50;
+  rawBigBuffer[2] = 0x4E;
+  rawBigBuffer[3] = 0x47;
+  rawBigBuffer[4] = 0x0D;
+  rawBigBuffer[5] = 0x0A;
+  rawBigBuffer[6] = 0x1A;
+  rawBigBuffer[7] = 0x0A;
   const bigFile = new File([rawBigBuffer], 'photo_produit_hd.png', { type: 'image/png' });
 
   assert(bigFile.size === fiveMbBytes, `Fichier source créé : ${(bigFile.size / (1024 * 1024)).toFixed(1)} MB`);

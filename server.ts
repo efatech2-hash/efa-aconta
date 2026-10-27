@@ -5,6 +5,9 @@ import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
+import crypto from 'crypto';
+import { ProductSchema, SaleSchema, EmployeeSchema, AdminActivateBoutiqueSchema } from './src/lib/serverValidation';
+
 dotenv.config({ path: '.env.local' });
 dotenv.config();
 
@@ -14,13 +17,73 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// SÉCURITÉ FORTERESSE - EN-TÊTES HTTP SÉCURISÉS (CSP, X-Frame-Options, XSS, etc.)
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; connect-src 'self' https: wss:; font-src 'self' https: data:; frame-ancestors 'self' https:;"
+  );
+  next();
+});
 
-// Supabase client pour le backend
-const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://ebqhujxkliutkkhgsekd.supabase.co';
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVicWh1anhrbGl1dGtraGdzZWtkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE4NzQ4NTgsImV4cCI6MjEwNzQ1MDg1OH0.3SPfCeZAUUIF7cV2YWMl8EmzbTBiltIivDCgzhAA9tU';
+// Limitation de taille des payloads JSON contre les attaques DoS
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// Supabase client pour le backend (Zéro clé en clair dans le code)
+const supabaseUrl = (process.env.VITE_SUPABASE_URL || 'https://ebqhujxkliutkkhgsekd.supabase.co').trim();
+const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// ==============================================================================
+// RATE LIMITING ANTI-BRUTE FORCE (SLIDING WINDOW)
+// ==============================================================================
+interface RateLimitRecord {
+  count: number;
+  resetAt: number;
+}
+const rateLimitMaps = new Map<string, Map<string, RateLimitRecord>>();
+
+function createRateLimiter(bucketName: string, maxRequests: number, windowMs: number) {
+  if (!rateLimitMaps.has(bucketName)) {
+    rateLimitMaps.set(bucketName, new Map());
+  }
+  const bucket = rateLimitMaps.get(bucketName)!;
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || '127.0.0.1';
+    const now = Date.now();
+    const record = bucket.get(ip);
+
+    if (!record || now > record.resetAt) {
+      bucket.set(ip, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (record.count >= maxRequests) {
+      const retryAfterSec = Math.ceil((record.resetAt - now) / 1000);
+      res.setHeader('Retry-After', retryAfterSec.toString());
+      return res.status(429).json({
+        error: 'TOO_MANY_REQUESTS',
+        message: `Limite de requêtes atteinte. Veuillez patienter ${retryAfterSec} secondes.`,
+      });
+    }
+
+    record.count++;
+    return next();
+  };
+}
+
+const adminLoginLimiter = createRateLimiter('admin_login', 5, 15 * 60 * 1000); // 5 tentatives / 15 min
+const generalApiLimiter = createRateLimiter('api_general', 120, 60 * 1000); // 120 req / min
+
+// Appliquer le limiteur général sur toutes les requêtes API
+app.use('/api', generalApiLimiter);
 
 // ==============================================================================
 // 1. DÉFINITION DES PLANS & LIMITES STRICTES
@@ -545,9 +608,44 @@ app.post('/api/webhooks/paiement', async (req: Request, res: Response) => {
 // ==============================================================================
 // 4.5. ENDPOINTS MODE SUPER ADMIN SÉPARÉ ET SÉCURISÉ
 // ==============================================================================
-const adminSessions = new Set<string>();
+// ==============================================================================
+// 4.5. ENDPOINTS MODE SUPER ADMIN SÉPARÉ ET SÉCURISÉ (FORTERESSE)
+// ==============================================================================
+interface AdminSessionInfo {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+}
+const adminSessions = new Map<string, AdminSessionInfo>();
 
-app.post('/api/admin/login', (req: Request, res: Response) => {
+function safeStringCompare(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a.trim());
+  const bufB = Buffer.from(b.trim());
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// Middleware d'authentification pour les routes administratives
+function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers['authorization'];
+  const token = (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : (req.headers['x-admin-token'] as string))?.trim();
+
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Accès refusé : token Super Admin manquant' });
+  }
+
+  const session = adminSessions.get(token);
+  if (!session || Date.now() > session.expiresAt) {
+    if (session) adminSessions.delete(token);
+    return res.status(401).json({ success: false, error: 'Session Super Admin invalide ou expirée' });
+  }
+
+  return next();
+}
+
+// Connexion Super Admin avec limitation anti-bruteforce stricte
+app.post('/api/admin/login', adminLoginLimiter, (req: Request, res: Response) => {
   const { email, password } = req.body || {};
   const expectedEmail = process.env.SUPER_ADMIN_EMAIL || '';
   const expectedPassword = process.env.SUPER_ADMIN_PASSWORD || '';
@@ -556,13 +654,24 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
     return res.status(400).json({ success: false, error: 'Email et mot de passe requis' });
   }
 
-  const isMatch =
-    email.trim().toLowerCase() === expectedEmail.trim().toLowerCase() &&
-    password === expectedPassword;
+  if (!expectedEmail || !expectedPassword) {
+    console.error('[SECURITY ALERT] Variables SUPER_ADMIN_EMAIL ou SUPER_ADMIN_PASSWORD non configurées !');
+    return res.status(500).json({ success: false, error: 'Configuration serveur incomplète' });
+  }
 
-  if (isMatch) {
-    const token = 'admin_sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
-    adminSessions.add(token);
+  const isEmailMatch = safeStringCompare(email.toLowerCase(), expectedEmail.toLowerCase());
+  const isPassMatch = safeStringCompare(password, expectedPassword);
+
+  if (isEmailMatch && isPassMatch) {
+    // Génération d'un token aléatoire cryptographiquement fort (256 bits)
+    const token = 'admin_sec_' + crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+    adminSessions.set(token, {
+      token,
+      createdAt: now,
+      expiresAt: now + 8 * 60 * 60 * 1000, // Valide 8 heures
+    });
+
     return res.json({
       success: true,
       token,
@@ -577,7 +686,11 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
 app.post('/api/admin/verify', (req: Request, res: Response) => {
   const { token } = req.body || {};
   if (token && adminSessions.has(token)) {
-    return res.json({ success: true, email: process.env.SUPER_ADMIN_EMAIL });
+    const session = adminSessions.get(token)!;
+    if (Date.now() < session.expiresAt) {
+      return res.json({ success: true, email: process.env.SUPER_ADMIN_EMAIL });
+    }
+    adminSessions.delete(token);
   }
   return res.status(401).json({ success: false, error: 'Session invalide ou expirée' });
 });
@@ -588,15 +701,52 @@ app.post('/api/admin/logout', (req: Request, res: Response) => {
   return res.json({ success: true });
 });
 
-app.get('/api/admin/boutiques', async (_req: Request, res: Response) => {
+// ==============================================================================
+// VALIDATION STRICTE DES DONNÉES CÔTÉ SERVEUR (ZOD)
+// ==============================================================================
+app.post('/api/validate/product', (req: Request, res: Response) => {
+  const parsed = ProductSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      errors: parsed.error.issues.map((e: any) => `${e.path.join('.')}: ${e.message}`),
+    });
+  }
+  return res.json({ success: true, data: parsed.data });
+});
+
+app.post('/api/validate/sale', (req: Request, res: Response) => {
+  const parsed = SaleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      errors: parsed.error.issues.map((e: any) => `${e.path.join('.')}: ${e.message}`),
+    });
+  }
+  return res.json({ success: true, data: parsed.data });
+});
+
+app.post('/api/validate/employee', (req: Request, res: Response) => {
+  const parsed = EmployeeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      errors: parsed.error.issues.map((e: any) => `${e.path.join('.')}: ${e.message}`),
+    });
+  }
+  return res.json({ success: true, data: parsed.data });
+});
+
+// ==============================================================================
+// GESTION SÉCURISÉE DES BOUTIQUES (ADMIN UNIQUEMENT - IDOR BLOQUÉ)
+// ==============================================================================
+app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Response) => {
   try {
-    // 1. Lire efa_boutiques
     const { data: efaBoutiques } = await supabase
       .from('efa_boutiques')
       .select('*')
       .order('created_at', { ascending: false });
 
-    // 2. Lire patrons
     const { data: patronsData } = await supabase
       .from('patrons')
       .select('*')
@@ -656,7 +806,6 @@ app.get('/api/admin/boutiques', async (_req: Request, res: Response) => {
     }
 
     const boutiques = Array.from(combinedMap.values());
-
     const total_boutiques = boutiques.length;
     const actives = boutiques.filter((b) => b.is_active && b.status !== 'expire' && b.status !== 'bloque').length;
     const expirees = boutiques.filter((b) => b.status === 'expire').length;
@@ -678,24 +827,28 @@ app.get('/api/admin/boutiques', async (_req: Request, res: Response) => {
   }
 });
 
-app.post('/api/admin/boutiques/activate', async (req: Request, res: Response) => {
+app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request, res: Response) => {
   try {
-    const { boutique_id, duration_days, plan, amount } = req.body || {};
-    if (!boutique_id) return res.status(400).json({ error: 'boutique_id requis' });
+    const parsed = AdminActivateBoutiqueSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Données invalides',
+        details: parsed.error.issues.map((e: any) => e.message),
+      });
+    }
 
-    const days = parseInt(duration_days, 10) || 365;
-    const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-    const payAmount = Number(amount) || (days >= 365 ? 90000 : 50000);
-    const chosenPlan = plan || (days >= 365 ? 'pro' : 'populaire');
+    const { boutique_id, duration_days, plan, amount } = parsed.data;
+    const expiryDate = new Date(Date.now() + duration_days * 24 * 60 * 60 * 1000).toISOString();
 
     try {
       await supabase
         .from('efa_boutiques')
         .update({
-          plan: chosenPlan,
+          plan,
           date_fin_essai: expiryDate,
           is_active: true,
-          last_payment_amount: payAmount,
+          last_payment_amount: amount,
         })
         .eq('id', boutique_id);
     } catch (e) {}
@@ -704,11 +857,11 @@ app.post('/api/admin/boutiques/activate', async (req: Request, res: Response) =>
       await supabase
         .from('patrons')
         .update({
-          subscription_status: chosenPlan,
+          subscription_status: plan,
           subscription_end_date: expiryDate,
           abonnement_expire: expiryDate,
           is_active: true,
-          last_payment_amount: payAmount,
+          last_payment_amount: amount,
         })
         .eq('id', boutique_id);
     } catch (e) {}
@@ -718,45 +871,45 @@ app.post('/api/admin/boutiques/activate', async (req: Request, res: Response) =>
         id: `admin_act_${Date.now()}`,
         patron_id: boutique_id,
         action_type: 'super_admin_activation',
-        description: `Activation Super Admin : ${chosenPlan.toUpperCase()} (${days} jours, ${payAmount.toLocaleString('fr-FR')} F)`,
-        montant: payAmount,
+        description: `Activation Super Admin : ${plan.toUpperCase()} (${duration_days} jours, ${amount.toLocaleString('fr-FR')} F)`,
+        montant: amount,
         created_at: new Date().toISOString(),
       });
     } catch (e) {}
 
     return res.json({
       success: true,
-      message: `Boutique activée pour ${days} jours avec succès`,
+      message: `Boutique activée pour ${duration_days} jours avec succès`,
       subscription_end: expiryDate,
-      amount: payAmount,
+      amount,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/admin/boutiques/toggle-status', async (req: Request, res: Response) => {
+app.post('/api/admin/boutiques/toggle-status', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { boutique_id, is_active } = req.body || {};
     if (!boutique_id) return res.status(400).json({ error: 'boutique_id requis' });
 
-    await supabase.from('efa_boutiques').update({ is_active }).eq('id', boutique_id);
-    await supabase.from('patrons').update({ is_active }).eq('id', boutique_id);
+    await supabase.from('efa_boutiques').update({ is_active: Boolean(is_active) }).eq('id', boutique_id);
+    await supabase.from('patrons').update({ is_active: Boolean(is_active) }).eq('id', boutique_id);
 
-    return res.json({ success: true, is_active });
+    return res.json({ success: true, is_active: Boolean(is_active) });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/admin/boutiques/prolong', async (req: Request, res: Response) => {
+app.post('/api/admin/boutiques/prolong', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { boutique_id, add_days, new_end_date } = req.body || {};
     if (!boutique_id) return res.status(400).json({ error: 'boutique_id requis' });
 
     let newEnd = new_end_date;
     if (!newEnd) {
-      const daysToAdd = parseInt(add_days, 10) || 30;
+      const daysToAdd = Math.max(1, Math.min(parseInt(add_days, 10) || 30, 3650));
       newEnd = new Date(Date.now() + daysToAdd * 86400000).toISOString();
     }
 
@@ -771,7 +924,7 @@ app.post('/api/admin/boutiques/prolong', async (req: Request, res: Response) => 
         forfait: 'PROLONGE',
         subscription_end_date: newEnd,
         abonnement_expire: newEnd,
-        is_active: true
+        is_active: true,
       }).eq('id', boutique_id);
     } catch {}
 
@@ -781,9 +934,11 @@ app.post('/api/admin/boutiques/prolong', async (req: Request, res: Response) => 
   }
 });
 
-app.delete('/api/admin/boutiques/:id', async (req: Request, res: Response) => {
+app.delete('/api/admin/boutiques/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
+    if (!id || typeof id !== 'string') return res.status(400).json({ error: 'ID invalide' });
+
     await supabase.from('efa_boutiques').delete().eq('id', id);
     await supabase.from('patrons').delete().eq('id', id);
     return res.json({ success: true });
