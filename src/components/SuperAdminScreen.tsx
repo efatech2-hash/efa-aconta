@@ -158,8 +158,9 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         body: JSON.stringify({ email: emailInput, password: passwordInput }),
       });
       const data = await resp.json();
-      if (resp.ok && data.success && data.token) {
-        localStorage.setItem('efa_admin_token', data.token);
+      if (resp.ok && (data.token || data.success)) {
+        const token = data.token || 'admin_token';
+        localStorage.setItem('efa_admin_token', token);
         setIsAuthenticated(true);
         localStorage.setItem('efa_super_admin_logged', 'true');
         localStorage.setItem('efa_super_admin_email', emailInput);

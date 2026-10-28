@@ -25,6 +25,7 @@
     "dexie": "^4.4.6",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.14.0",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
