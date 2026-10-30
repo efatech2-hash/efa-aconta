@@ -29,9 +29,16 @@ import {
   CheckCircle2,
   Trash2,
   Laptop,
+  Bell,
 } from 'lucide-react';
 import type { Patron, CurrentUser, Employe } from '../lib/types';
 import { verifyPin, hashPin } from '../lib/security';
+import {
+  showNotif,
+  NOTIF_ENABLED_KEY,
+  NOTIF_HOUR_KEY,
+  NOTIF_SETTINGS_EVENT,
+} from '../lib/dailyNotification';
 import { db } from '../lib/db';
 import { queueSyncItem } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
@@ -91,6 +98,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Préférence auto-déconnexion
   const [autoLogout, setAutoLogout] = useState(patron.auto_logout_after_action ?? true);
+
+  // Rappel Quotidien 9h
+  const [notifEnabled, setNotifEnabled] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(NOTIF_ENABLED_KEY) !== 'false';
+    }
+    return true;
+  });
+  const [notifHour, setNotifHour] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(NOTIF_HOUR_KEY) || '9';
+    }
+    return '9';
+  });
+  const [isTestingNotif, setIsTestingNotif] = useState(false);
+  const [testNotifFeedback, setTestNotifFeedback] = useState<string | null>(null);
 
   // MODIF 6: Modifier Nom patron
   const [patronNom, setPatronNom] = useState(patron.nom);
@@ -475,6 +498,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     onPatronUpdated(updated);
   };
 
+  const handleToggleNotif = () => {
+    const nextVal = !notifEnabled;
+    setNotifEnabled(nextVal);
+    localStorage.setItem(NOTIF_ENABLED_KEY, nextVal ? 'true' : 'false');
+    window.dispatchEvent(new Event(NOTIF_SETTINGS_EVENT));
+    if (nextVal && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  };
+
+  const handleChangeNotifHour = (hour: string) => {
+    setNotifHour(hour);
+    localStorage.setItem(NOTIF_HOUR_KEY, hour);
+    window.dispatchEvent(new Event(NOTIF_SETTINGS_EVENT));
+  };
+
+  const handleTestNotification = async () => {
+    setIsTestingNotif(true);
+    setTestNotifFeedback(null);
+    try {
+      if ('Notification' in window && Notification.permission === 'default') {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') {
+          setTestNotifFeedback('Permission refusée par le navigateur (un toast in-app sera affiché)');
+        }
+      }
+      await showNotif();
+      setTestNotifFeedback('✅ Notification envoyée avec succès !');
+      setTimeout(() => setTestNotifFeedback(null), 4000);
+    } catch (e: any) {
+      setTestNotifFeedback('Erreur lors du test : ' + (e.message || 'échec'));
+    } finally {
+      setIsTestingNotif(false);
+    }
+  };
+
   // Soumission changement de PIN normal
   const handleChangePinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -690,6 +749,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <ToggleLeft className="w-8 h-8 text-gray-400" />
             )}
           </button>
+        </div>
+
+        {/* SECTION 🔔 RAPPEL QUOTIDIEN (9H MATIN HEURE LOMÉ / UTC) */}
+        <div className="p-3 sm:p-3.5 rounded-xl bg-amber-50/80 border border-amber-200/90 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <Bell className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="font-extrabold text-xs sm:text-sm text-gray-900 leading-snug">
+                  🔔 Rappel Quotidien
+                </h4>
+                <p className="text-[11px] font-medium text-gray-600 mt-0.5 leading-tight">
+                  Notification chaque matin pour ouvrir ta caisse et faire le point.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleToggleNotif}
+              className="focus:outline-none transition transform active:scale-90 shrink-0 cursor-pointer"
+              aria-label="Toggle rappel quotidien"
+            >
+              {notifEnabled ? (
+                <ToggleRight className="w-8 h-8 text-[#00B894]" />
+              ) : (
+                <ToggleLeft className="w-8 h-8 text-gray-400" />
+              )}
+            </button>
+          </div>
+
+          {notifEnabled && (
+            <div className="pt-2 border-t border-amber-200/60 space-y-2.5 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-gray-700">
+                  Heure du rappel :
+                </label>
+                <select
+                  value={notifHour}
+                  onChange={(e) => handleChangeNotifHour(e.target.value)}
+                  className="bg-white border border-amber-300 rounded-xl px-2.5 py-1.5 text-xs font-black text-gray-800 focus:outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer shadow-xs"
+                >
+                  <option value="8">8h du matin</option>
+                  <option value="9">9h du matin (par défaut)</option>
+                  <option value="10">10h du matin</option>
+                </select>
+              </div>
+
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={handleTestNotification}
+                  disabled={isTestingNotif}
+                  className="w-full py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-98 text-white font-black text-xs flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>{isTestingNotif ? 'Envoi en cours...' : 'Tester notification maintenant'}</span>
+                </button>
+              </div>
+
+              {testNotifFeedback && (
+                <p className="text-[11px] font-bold text-center text-amber-900 bg-amber-100/90 p-2 rounded-xl border border-amber-300">
+                  {testNotifFeedback}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* MODIF 6: SECTION MON PROFIL */}

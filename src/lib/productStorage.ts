@@ -71,6 +71,12 @@ export async function checkProductQuota(
     }
   }
 
+  // Prise en compte du stock local Dexie (Offline-First)
+  try {
+    const localCount = await db.produits.where('patron_id').equals(userId).count();
+    count = Math.max(count, localCount);
+  } catch {}
+
   const maxLimit = PLAN_LIMITS[plan] || 7;
   const percentage = Math.min(100, Math.round((count / maxLimit) * 100));
 

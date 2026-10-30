@@ -63,6 +63,7 @@ import {
   setDeviceStore,
   clearDeviceStore,
 } from './lib/mesBoutiques';
+import { useDailyNotif, showNotif } from './lib/dailyNotification';
 
 function checkIsAdminRoute(): boolean {
   if (typeof window === 'undefined') return false;
@@ -294,12 +295,45 @@ export default function App() {
 
   const isLoadingDatabaseRef = useRef(false);
   const [toastNotification, setToastNotification] = useState<{ message: string; type: 'success' | 'warning' | 'info'; } | null>(null);
+  const [bottomToast, setBottomToast] = useState<string | null>(null);
 
   const showToast = useCallback((message: string, type: 'success' | 'warning' | 'info' = 'info') => {
     setToastNotification({ message, type });
     const timer = setTimeout(() => setToastNotification(null), 3500);
     return () => clearTimeout(timer);
   }, []);
+
+  const showToastBottom = useCallback((msg: string) => {
+    setBottomToast(msg);
+    const timer = setTimeout(() => setBottomToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // RAPPEL QUOTIDIEN 9H (HEURE LOMÉ UTC+0) - NOTIFICATION ANDROID / SERVICE WORKER & CATCH-UP
+  useDailyNotif(showToastBottom);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      // 1. Demande permission Notification si besoin
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+      // 2. Enregistre sw.js
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleToastEvent = (e: any) => {
+      if (e.detail?.message) {
+        showToastBottom(e.detail.message);
+      }
+    };
+    window.addEventListener('efa_toast_notif', handleToastEvent);
+    return () => window.removeEventListener('efa_toast_notif', handleToastEvent);
+  }, [showToastBottom]);
 
   const loadDatabase = useCallback(async () => {
     if (isLoadingDatabaseRef.current) return;
@@ -766,12 +800,46 @@ export default function App() {
         />
         <EFAVoiceAssistant isOnline={isOnline} products={products} onCommandParsed={(cmd) => setPendingVoiceAction(cmd)} />
         <ConfirmationModal isOpen={!!pendingVoiceAction} summary={pendingVoiceAction?.summary || ''} transcript={pendingVoiceAction?.raw_transcript || ''} onConfirm={handleConfirmVoiceAction} onCancel={handleCancelVoiceAction} />
+        {bottomToast && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[99999] max-w-[92vw] w-full sm:w-auto animate-in fade-in slide-in-from-bottom-5 duration-300">
+            <div className="px-5 py-3.5 rounded-2xl bg-amber-500 text-white font-black text-xs sm:text-sm shadow-2xl flex items-center gap-3 border border-amber-300/80 backdrop-blur-md">
+              <span className="text-xl shrink-0">👑</span>
+              <p className="flex-1 leading-snug">{bottomToast}</p>
+              <button
+                type="button"
+                onClick={() => setBottomToast(null)}
+                className="p-1 hover:bg-white/20 rounded-lg text-white font-black cursor-pointer shrink-0"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   if (isPinLocked && !getIsPickingPhoto()) {
-    return <PinLockScreen patron={patron} employes={employes} currentUser={currentUser} onUnlock={handleUnlockPin} />;
+    return (
+      <>
+        <PinLockScreen patron={patron} employes={employes} currentUser={currentUser} onUnlock={handleUnlockPin} />
+        {bottomToast && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[99999] max-w-[92vw] w-full sm:w-auto animate-in fade-in slide-in-from-bottom-5 duration-300">
+            <div className="px-5 py-3.5 rounded-2xl bg-amber-500 text-white font-black text-xs sm:text-sm shadow-2xl flex items-center gap-3 border border-amber-300/80 backdrop-blur-md">
+              <span className="text-xl shrink-0">👑</span>
+              <p className="flex-1 leading-snug">{bottomToast}</p>
+              <button
+                type="button"
+                onClick={() => setBottomToast(null)}
+                className="p-1 hover:bg-white/20 rounded-lg text-white font-black cursor-pointer shrink-0"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
   }
 
   return (
@@ -782,6 +850,21 @@ export default function App() {
             <div className={`px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2.5 text-xs sm:text-sm font-bold border backdrop-blur-md ${toastNotification.type === 'success' ? 'bg-emerald-900/95 text-emerald-100 border-emerald-500/40' : toastNotification.type === 'warning' ? 'bg-amber-900/95 text-amber-100 border-amber-500/40' : 'bg-slate-900/95 text-slate-100 border-slate-700/40'}`}>
               <div className={`w-2.5 h-2.5 rounded-full ${toastNotification.type === 'success' ? 'bg-emerald-400 animate-pulse' : toastNotification.type === 'warning' ? 'bg-amber-400 animate-pulse' : 'bg-blue-400'}`} />
               <span>{toastNotification.message}</span>
+            </div>
+          </div>
+        )}
+        {bottomToast && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[99999] max-w-[92vw] w-full sm:w-auto animate-in fade-in slide-in-from-bottom-5 duration-300">
+            <div className="px-5 py-3.5 rounded-2xl bg-amber-500 text-white font-black text-xs sm:text-sm shadow-2xl flex items-center gap-3 border border-amber-300/80 backdrop-blur-md">
+              <span className="text-xl shrink-0">👑</span>
+              <p className="flex-1 leading-snug">{bottomToast}</p>
+              <button
+                type="button"
+                onClick={() => setBottomToast(null)}
+                className="p-1 hover:bg-white/20 rounded-lg text-white font-black cursor-pointer shrink-0"
+              >
+                ✕
+              </button>
             </div>
           </div>
         )}
