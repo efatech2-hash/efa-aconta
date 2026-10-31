@@ -15,18 +15,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const portArgIndex = process.argv.indexOf('--port');
+const portFromArg = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? parseInt(process.argv[portArgIndex + 1], 10) : null;
+const PORT = portFromArg || 3000;
 
-// SÉCURITÉ FORTERESSE - EN-TÊTES HTTP SÉCURISÉS (CSP, X-Frame-Options, XSS, etc.)
+// SÉCURITÉ FORTERESSE - EN-TÊTES HTTP SÉCURISÉS (Compatibles iframe AI Studio & PWA)
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  // Ne pas définir X-Frame-Options: SAMEORIGIN car l'applet s'exécute dans l'iFrame AI Studio
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; connect-src 'self' https: wss:; font-src 'self' https: data:; frame-ancestors 'self' https:;"
+    "default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; connect-src 'self' https: wss: ws:; font-src 'self' https: data:; frame-ancestors 'self' https://*.google.com https://*.run.app https:;"
   );
   next();
 });
