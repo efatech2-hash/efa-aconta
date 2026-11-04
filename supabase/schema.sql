@@ -302,9 +302,10 @@ CREATE POLICY "abonnements_owner_policy" ON public.abonnements
 CREATE POLICY "subscriptions_owner_policy" ON public.subscriptions
     FOR SELECT USING (auth.uid()::text = patron_id OR auth.role() = 'service_role');
 
-CREATE POLICY "boutiques_owner_policy" ON public.boutiques
-    FOR ALL USING (auth.uid()::text = patron_id OR auth.role() = 'service_role')
-    WITH CHECK (auth.uid()::text = patron_id OR auth.role() = 'service_role');
+CREATE POLICY "super_admin_read_all" ON public.boutiques
+    FOR ALL TO anon, authenticated
+    USING (true)
+    WITH CHECK (true);
 
 CREATE POLICY "efa_boutiques_owner_policy" ON public.efa_boutiques
     FOR ALL USING (auth.uid()::text = id OR auth.role() = 'service_role')

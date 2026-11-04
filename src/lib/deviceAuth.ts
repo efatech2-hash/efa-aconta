@@ -207,6 +207,15 @@ export async function createBoutique({
       created_at: now.toISOString(),
     };
 
+    console.log('[DeviceAuth CREATE] Inserting new boutique into BOTH boutiques & profiles:', {
+      id: boutiqueId,
+      nom_boutique: nomBoutique.trim(),
+      proprietaire: nomPatron.trim() || 'Patron',
+      referral_code: referralCode,
+      referred_by_code: cleanReferredBy,
+      subscription_end_date: trialEnd.toISOString(),
+    });
+
     // 1. Enregistrement central direct dans Supabase table "boutiques"
     // (id, nom_boutique, proprietaire, email, telephone, created_at, user_id, status, referral_code, referred_by_code, subscription_end_date)
     const centralBoutiqueData = {
@@ -232,18 +241,21 @@ export async function createBoutique({
     };
 
     try {
-      const { error: insertErr } = await supabase.from('boutiques').insert(centralBoutiqueData);
+      const { error: insertErr } = await supabase
+        .from('boutiques')
+        .upsert(centralBoutiqueData, { onConflict: 'id' });
       if (insertErr) {
-        console.warn('[DeviceAuth] Insert boutiques initial, tentative upsert:', insertErr);
-        await supabase.from('boutiques').upsert(centralBoutiqueData);
+        console.error('[DeviceAuth CREATE] ERREUR INSERT/UPSERT BOUTIQUES:', insertErr);
+      } else {
+        console.log('[DeviceAuth CREATE] SUCCÈS INSERT BOUTIQUES:', boutiqueId);
       }
     } catch (supaErr) {
-      console.warn('[DeviceAuth] Erreur insert Supabase boutiques:', supaErr);
+      console.error('[DeviceAuth CREATE] EXCEPTION BOUTIQUES:', supaErr);
     }
 
-    // 2. Enregistrement table "profiles"
+    // 2. Enregistrement table "profiles" (même id, même referral_code, même subscription_end_date)
     try {
-      await supabase.from('profiles').upsert({
+      const profileData = {
         id: boutiqueId,
         user_id: boutiqueId,
         nom: nomPatron.trim() || 'Patron',
@@ -253,9 +265,17 @@ export async function createBoutique({
         referred_by_code: cleanReferredBy,
         subscription_end_date: trialEnd.toISOString(),
         created_at: now.toISOString(),
-      });
+      };
+      const { error: profileErr } = await supabase
+        .from('profiles')
+        .upsert(profileData, { onConflict: 'id' });
+      if (profileErr) {
+        console.error('[DeviceAuth CREATE] ERREUR INSERT PROFILES:', profileErr);
+      } else {
+        console.log('[DeviceAuth CREATE] SUCCÈS INSERT PROFILES:', boutiqueId);
+      }
     } catch (profileErr) {
-      console.warn('[DeviceAuth] Sync profiles:', profileErr);
+      console.error('[DeviceAuth CREATE] EXCEPTION PROFILES:', profileErr);
     }
 
     // 3. Suivi parrainage : création de l'entrée dans la table centrale "referrals" avec status=pending

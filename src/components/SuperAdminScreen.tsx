@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Shield,
   Store,
@@ -29,6 +29,7 @@ import {
   Users,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { db } from '../lib/db';
 import {
   checkAndGiveReferralBonus,
   getTotalAnnualReferralsCount,
@@ -274,27 +275,167 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     };
   };
 
+  const hasMigratedRef = useRef(false);
+
   // ============================================================================
-  // CHARGEMENT CENTRALISÉ DES BOUTIQUES DEPUIS SUPABASE (ZÉRO LOCALSTORAGE)
+  // RESTAURATION ANCIENS COMPTES VERS SUPABASE (ONCE ON LOAD)
+  // ============================================================================
+  const migrateLocalToSupabase = async (): Promise<number> => {
+    let restoredCount = 0;
+    try {
+      console.log('[SuperAdmin Migration] Vérification des anciens comptes locaux...');
+      const candidates: any[] = [];
+
+      // 1. Lire localStorage efa_boutiques
+      try {
+        const raw = localStorage.getItem('efa_boutiques');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) candidates.push(...parsed);
+          else if (typeof parsed === 'object' && parsed) candidates.push(parsed);
+        }
+      } catch (e) {}
+
+      // 2. Lire localStorage boutiques
+      try {
+        const raw = localStorage.getItem('boutiques');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) candidates.push(...parsed);
+          else if (typeof parsed === 'object' && parsed) candidates.push(parsed);
+        }
+      } catch (e) {}
+
+      // 3. Lire localStorage efa_accounts
+      try {
+        const raw = localStorage.getItem('efa_accounts');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) candidates.push(...parsed);
+          else if (typeof parsed === 'object' && parsed) candidates.push(parsed);
+        }
+      } catch (e) {}
+
+      // 4. Lire localStorage patron ou efa_device_boutique
+      try {
+        const raw = localStorage.getItem('efa_device_boutique') || localStorage.getItem('patron');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object') {
+            if (Array.isArray(parsed)) candidates.push(...parsed);
+            else if (parsed.id) candidates.push(parsed);
+          }
+        }
+      } catch (e) {}
+
+      // 5. Lire Dexie local (db.patrons)
+      try {
+        const dexiePatrons = await db.patrons.toArray();
+        if (Array.isArray(dexiePatrons)) candidates.push(...dexiePatrons);
+      } catch (e) {}
+
+      if (candidates.length === 0) {
+        console.log('[SuperAdmin Migration] Aucun ancien compte local trouvé.');
+        return 0;
+      }
+
+      // Dédoublonnage par identifiant
+      const uniqueMap = new Map<string, any>();
+      for (const item of candidates) {
+        if (!item) continue;
+        const id = item.id || ('btq_' + (item.nom_boutique || item.nom_affichage || item.nom || 'legacy').toLowerCase().replace(/[^a-z0-9]/g, '_'));
+        if (!uniqueMap.has(id)) {
+          uniqueMap.set(id, { ...item, id });
+        }
+      }
+
+      console.log(`[SuperAdmin Migration] ${uniqueMap.size} compte(s) candidat(s) à la restauration.`);
+
+      for (const item of uniqueMap.values()) {
+        const nowIso = new Date().toISOString();
+        const subEnd = item.subscription_end || item.subscription_end_date || item.date_fin_essai || item.fin_abonnement || item.abonnement_expire || nowIso;
+        const nomBoutique = item.nom_boutique || item.nom_affichage || item.nom || 'Boutique EFA';
+        const proprietaire = item.proprietaire || item.nom_patron || item.nom || 'Patron';
+
+        const row = {
+          id: item.id,
+          nom_boutique: nomBoutique,
+          proprietaire: proprietaire,
+          email: item.email || '',
+          telephone: item.telephone || item.phone || '',
+          created_at: item.created_at || nowIso,
+          user_id: item.user_id || item.id,
+          status: item.status || (item.is_active === false ? 'bloque' : 'actif'),
+          nom: nomBoutique,
+          patron_id: item.id,
+          pin_code: item.pin_code || item.code_pin || '0000',
+          plan: item.plan || item.forfait || 'essai',
+          subscription_end: subEnd,
+          subscription_end_date: subEnd,
+          referral_code: item.referral_code || null,
+          referred_by_code: item.referred_by_code || item.referred_by || null,
+          referred_by: item.referred_by || null,
+          is_active: item.is_active !== false,
+          last_payment_amount: Number(item.last_payment_amount) || Number(item.prix) || 0,
+        };
+
+        const { error: insErr } = await supabase
+          .from('boutiques')
+          .upsert(row, { onConflict: 'id', ignoreDuplicates: true });
+
+        if (!insErr) {
+          restoredCount++;
+          try {
+            await supabase.from('profiles').upsert({
+              id: row.id,
+              user_id: row.id,
+              nom: row.proprietaire,
+              nom_boutique: row.nom_boutique,
+              telephone: row.telephone,
+              referral_code: row.referral_code,
+              referred_by_code: row.referred_by_code,
+              subscription_end_date: row.subscription_end_date,
+              created_at: row.created_at,
+            }, { onConflict: 'id', ignoreDuplicates: true });
+          } catch {}
+        } else {
+          console.warn('[SuperAdmin Migration] Note insertion compte:', item.id, insErr);
+        }
+      }
+
+      console.log(`[SuperAdmin Migration] Terminé : ${restoredCount} ancien(s) compte(s) restauré(s).`);
+    } catch (migrErr) {
+      console.error('[SuperAdmin Migration] Erreur migration:', migrErr);
+    }
+    return restoredCount;
+  };
+
+  // ============================================================================
+  // CHARGEMENT CENTRALISÉ DES BOUTIQUES DEPUIS SUPABASE (SANS FILTRE USER_ID)
   // ============================================================================
   const loadBoutiques = async () => {
     setIsLoadingData(true);
     try {
-      // 1. Requête principale centrale sur la table Supabase 'boutiques'
+      // 1. Requête principale centrale sur la table Supabase 'boutiques' (SANS AUCUN FILTRE USER_ID)
       const { data: centralData, error: centralErr } = await supabase
         .from('boutiques')
         .select('*')
         .order('created_at', { ascending: false });
 
+      console.log('SUPER ADMIN FETCH', centralData, centralErr);
+
       if (centralErr) {
-        console.warn('[SUPER ADMIN] Note requête boutiques:', centralErr);
+        console.error('[SUPER ADMIN] ERREUR FETCH BOUTIQUES:', centralErr);
       }
 
-      // 2. Requête miroir sur efa_boutiques et patrons Supabase (ZÉRO lecture Dexie/localStorage)
-      const [efaRes, patronsRes] = await Promise.all([
+      // 2. Requête miroir sur profiles, efa_boutiques et patrons Supabase pour ne rien perdre
+      const [profilesRes, efaRes, patronsRes] = await Promise.all([
+        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
         supabase.from('efa_boutiques').select('*').order('created_at', { ascending: false }),
         supabase.from('patrons').select('*').order('created_at', { ascending: false }),
       ]);
+
+      console.log('SUPER ADMIN PROFILES FETCH', profilesRes.data, profilesRes.error);
 
       const combined = new Map<string, AdminBoutique>();
 
@@ -305,7 +446,21 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         }
       }
 
-      // Compléter avec efa_boutiques
+      // Compléter avec profiles si manquant dans boutiques
+      if (Array.isArray(profilesRes.data)) {
+        for (const p of profilesRes.data) {
+          if (!combined.has(p.id)) {
+            combined.set(p.id, formatBoutiqueRow({
+              ...p,
+              nom_boutique: p.nom_boutique || p.nom,
+              proprietaire: p.nom,
+              subscription_end: p.subscription_end_date,
+            }));
+          }
+        }
+      }
+
+      // Compléter avec efa_boutiques si manquant
       if (Array.isArray(efaRes.data)) {
         for (const b of efaRes.data) {
           if (!combined.has(b.id)) {
@@ -319,7 +474,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         }
       }
 
-      // Compléter avec patrons
+      // Compléter avec patrons si manquant
       if (Array.isArray(patronsRes.data)) {
         for (const p of patronsRes.data) {
           if (!combined.has(p.id)) {
@@ -340,6 +495,8 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         return db - da;
       });
 
+      console.log('SUPER ADMIN TOTAL BOUTIQUES REÇUES:', list.length);
+
       const codeToName = new Map<string, string>();
       for (const item of list) {
         if (item.referral_code) {
@@ -355,7 +512,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       setBoutiques(list);
       getTotalAnnualReferralsCount().then(setAnnualReferralsCount).catch(() => {});
     } catch (err: any) {
-      console.error('[SUPER ADMIN] Erreur chargement:', err);
+      console.error('[SUPER ADMIN] Erreur loadBoutiques:', err);
       showToast('Erreur lors du chargement des boutiques', 'error');
     } finally {
       setIsLoadingData(false);
@@ -368,8 +525,19 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    loadBoutiques();
-    loadReferrals();
+    const initSuperAdmin = async () => {
+      if (!hasMigratedRef.current) {
+        hasMigratedRef.current = true;
+        const restored = await migrateLocalToSupabase();
+        if (restored > 0) {
+          showToast(`✅ ${restored} ancien(s) compte(s) restauré(s) dans Supabase !`, 'success');
+        }
+      }
+      await loadBoutiques();
+      await loadReferrals();
+    };
+
+    initSuperAdmin();
 
     const channel = supabase
       .channel('boutiques_realtime_changes')
@@ -386,6 +554,14 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             });
             showToast(`Nouvelle boutique connectée : ${newRow.nom_boutique} !`, 'info');
           }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'profiles' },
+        (payload) => {
+          console.log('[REALTIME] Nouveau profile inséré:', payload.new);
+          loadBoutiques();
         }
       )
       .on(
