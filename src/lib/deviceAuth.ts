@@ -106,26 +106,26 @@ export function getCurrentBoutiqueId(): string | null {
 /**
  * Convertit un enregistrement boutique en objet Patron pour compatibilité complète
  */
-export function boutiqueToPatron(b: EfaBoutiqueRecord, pinClear?: string): Patron {
-  const pin = pinClear || b.pin_code || '';
-  const finAbonnement = (b as any).fin_abonnement || (b as any).subscription_end_date || b.date_fin_essai;
+export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string): Patron {
+  const pin = pinClear || b.pin_code || b.code_pin || '';
+  const finAbonnement = (b as any).subscription_end || (b as any).subscription_end_date || (b as any).fin_abonnement || b.date_fin_essai;
   return {
     id: b.id,
-    nom: b.nom_patron || b.nom_affichage,
-    telephone: '',
+    nom: (b as any).proprietaire || b.nom_patron || b.nom_affichage || (b as any).nom || 'Patron',
+    telephone: (b as any).telephone || '',
     phone_country: '+228',
-    phone_number: '',
-    phone_full: '',
-    nom_boutique: b.nom_affichage,
+    phone_number: (b as any).telephone || '',
+    phone_full: (b as any).telephone || '',
+    nom_boutique: b.nom_boutique || b.nom_affichage || (b as any).nom || 'Ma Boutique',
     pin_code: pin,
     code_pin: pin,
-    pin_hash: b.pin_patron_hash,
+    pin_hash: b.pin_patron_hash || (b as any).pin_hash,
     genre: 'femme',
     role: 'patron',
     abonnement_expire: finAbonnement || b.date_fin_essai,
-    subscription_status: (b as any).statut === 'ACTIF' ? 'populaire' : (b.plan === 'essai' ? 'trial' : (b.plan as any)),
+    subscription_status: (b as any).statut === 'ACTIF' || (b as any).status === 'actif' ? 'populaire' : (b.plan === 'essai' ? 'trial' : (b.plan as any)),
     trial_start_date: b.created_at,
-    trial_end_date: b.date_fin_essai,
+    trial_end_date: b.date_fin_essai || finAbonnement,
     subscription_end_date: finAbonnement || b.date_fin_essai,
     fin_abonnement: finAbonnement,
     forfait: (b as any).forfait || b.plan,
@@ -324,9 +324,8 @@ export async function createBoutique({
       }
     }
 
-    // 2. Miroirs de secours efa_boutiques, efa_devices et patrons dans Supabase
+    // 2. Miroirs de secours efa_devices et patrons dans Supabase
     try {
-      await supabase.from('efa_boutiques').upsert(boutiqueRecord);
       const currentDevId = getDeviceId();
       const currentDevName = getDeviceName();
       const deviceRecord: EfaDeviceRecord = {
@@ -424,23 +423,6 @@ export async function loginBoutique({
       console.warn('[DeviceAuth] Erreur recherche Supabase boutiques:', e);
     }
 
-    // 2. Recherche dans Supabase efa_boutiques
-    if (!boutique) {
-      try {
-        const { data: remoteBtq } = await supabase
-          .from('efa_boutiques')
-          .select('*')
-          .or(`nom_boutique.eq.${searchSlug},nom_affichage.ilike.%${nomOrSlug.trim()}%`)
-          .limit(1)
-          .maybeSingle();
-
-        if (remoteBtq) {
-          boutique = remoteBtq;
-        }
-      } catch (e) {
-        console.warn('[DeviceAuth] Erreur recherche Supabase efa_boutiques:', e);
-      }
-    }
 
     // 2. Fallback recherche dans table patrons Supabase
     if (!boutique) {

@@ -57,12 +57,6 @@ export async function activerPro1An(patronId: string) {
     subscription_status: 'pro',
   } as any).eq('id', patronId);
 
-  await supabase.from('efa_boutiques').update({
-    plan: 'pro_annuel',
-    date_fin_essai: fin,
-    is_active: true,
-    last_payment_amount: 90000,
-  } as any).eq('id', patronId);
 
   await supabase.from('boutiques').update({
     plan: 'pro_annuel',
@@ -101,12 +95,6 @@ export async function activer6Mois(patronId: string) {
     subscription_status: 'pro',
   } as any).eq('id', patronId);
 
-  await supabase.from('efa_boutiques').update({
-    plan: 'pro_6mois',
-    date_fin_essai: fin,
-    is_active: true,
-    last_payment_amount: 50000,
-  } as any).eq('id', patronId);
 
   await supabase.from('boutiques').update({
     plan: 'pro_6mois',
@@ -135,12 +123,6 @@ export async function activerPopulaire1An(patronId: string) {
     subscription_status: 'populaire',
   } as any).eq('id', patronId);
 
-  await supabase.from('efa_boutiques').update({
-    plan: 'populaire',
-    date_fin_essai: fin,
-    is_active: true,
-    last_payment_amount: 16500,
-  } as any).eq('id', patronId);
 
   await supabase.from('boutiques').update({
     plan: 'populaire',

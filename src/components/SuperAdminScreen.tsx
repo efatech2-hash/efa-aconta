@@ -160,27 +160,12 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   };
 
   useEffect(() => {
-    // Vérification de validité du token admin au chargement
+    // Vérification de validité de la session locale sans appel 404
     const token = typeof window !== 'undefined' ? localStorage.getItem('efa_admin_token') : null;
-    if (isAuthenticated && token) {
-      fetch('/api/admin/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (!data.success) {
-            handleLogout();
-          }
-        })
-        .catch(() => {
-          // Si le serveur est temporairement inaccessible, garder la session
-        });
-    } else if (isAuthenticated && !token) {
+    if (isAuthenticated && !token) {
       handleLogout();
     }
-  }, []);
+  }, [isAuthenticated]);
 
   // Numéro WhatsApp Super Admin depuis variable d'environnement ou fallback
   const whatsappNumber =
@@ -225,14 +210,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   };
 
   const handleLogout = () => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('efa_admin_token') : null;
-    if (token) {
-      fetch('/api/admin/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      }).catch(() => {});
-    }
     setIsAuthenticated(false);
     localStorage.removeItem('efa_super_admin_logged');
     localStorage.removeItem('efa_admin_token');
@@ -416,7 +393,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   const loadBoutiques = async () => {
     setIsLoadingData(true);
     try {
-      // 1. Requête principale centrale sur la table Supabase 'boutiques' (SANS AUCUN FILTRE USER_ID)
+      // Requête unique centrale sur la table Supabase 'boutiques' (SANS AUCUN FILTRE USER_ID)
       const { data: centralData, error: centralErr } = await supabase
         .from('boutiques')
         .select('*')
@@ -428,72 +405,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         console.error('[SUPER ADMIN] ERREUR FETCH BOUTIQUES:', centralErr);
       }
 
-      // 2. Requête miroir sur profiles, efa_boutiques et patrons Supabase pour ne rien perdre
-      const [profilesRes, efaRes, patronsRes] = await Promise.all([
-        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
-        supabase.from('efa_boutiques').select('*').order('created_at', { ascending: false }),
-        supabase.from('patrons').select('*').order('created_at', { ascending: false }),
-      ]);
-
-      console.log('SUPER ADMIN PROFILES FETCH', profilesRes.data, profilesRes.error);
-
-      const combined = new Map<string, AdminBoutique>();
-
-      // Intégrer table centrale 'boutiques'
-      if (Array.isArray(centralData)) {
-        for (const row of centralData) {
-          combined.set(row.id, formatBoutiqueRow(row));
-        }
-      }
-
-      // Compléter avec profiles si manquant dans boutiques
-      if (Array.isArray(profilesRes.data)) {
-        for (const p of profilesRes.data) {
-          if (!combined.has(p.id)) {
-            combined.set(p.id, formatBoutiqueRow({
-              ...p,
-              nom_boutique: p.nom_boutique || p.nom,
-              proprietaire: p.nom,
-              subscription_end: p.subscription_end_date,
-            }));
-          }
-        }
-      }
-
-      // Compléter avec efa_boutiques si manquant
-      if (Array.isArray(efaRes.data)) {
-        for (const b of efaRes.data) {
-          if (!combined.has(b.id)) {
-            combined.set(b.id, formatBoutiqueRow({
-              ...b,
-              nom_boutique: b.nom_affichage || b.nom_boutique,
-              proprietaire: b.nom_patron,
-              subscription_end: b.date_fin_essai,
-            }));
-          }
-        }
-      }
-
-      // Compléter avec patrons si manquant
-      if (Array.isArray(patronsRes.data)) {
-        for (const p of patronsRes.data) {
-          if (!combined.has(p.id)) {
-            combined.set(p.id, formatBoutiqueRow({
-              ...p,
-              nom_boutique: p.nom_boutique,
-              proprietaire: p.nom,
-              subscription_end: p.fin_abonnement || p.subscription_end_date || p.abonnement_expire || p.trial_end_date,
-            }));
-          }
-        }
-      }
-
-      const list = Array.from(combined.values());
-      list.sort((a, b) => {
-        const da = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const db = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return db - da;
-      });
+      const list: AdminBoutique[] = (centralData || []).map((row: any) => formatBoutiqueRow(row));
 
       console.log('SUPER ADMIN TOTAL BOUTIQUES REÇUES:', list.length);
 
@@ -670,15 +582,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         } as any)
         .eq('id', boutique.id);
 
-      await supabase
-        .from('efa_boutiques')
-        .update({
-          plan: planCode,
-          date_fin_essai: expiryDate,
-          is_active: true,
-          last_payment_amount: amount,
-        } as any)
-        .eq('id', boutique.id);
 
       await supabase
         .from('patrons')
@@ -761,7 +664,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       } catch {}
 
       await supabase.from('boutiques').update({ is_active: newActiveState, status: newActiveState ? 'actif' : 'bloque' } as any).eq('id', boutique.id);
-      await supabase.from('efa_boutiques').update({ is_active: newActiveState }).eq('id', boutique.id);
       await supabase.from('patrons').update({ is_active: newActiveState }).eq('id', boutique.id);
 
       showToast(
@@ -824,17 +726,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
           .eq('id', boutique.id);
       } catch (errP) {}
 
-      // 3. Update Supabase table efa_boutiques
-      try {
-        await supabase
-          .from('efa_boutiques')
-          .update({
-            date_fin_essai: nouvelleDateIso,
-            is_active: true,
-          })
-          .eq('id', boutique.id);
-      } catch (e) {}
-
       // 4. Update Backend API
       try {
         await adminFetch('/api/admin/boutiques/prolong', {
@@ -895,7 +786,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       } catch {}
 
       await supabase.from('boutiques').delete().eq('id', boutique.id);
-      await supabase.from('efa_boutiques').delete().eq('id', boutique.id);
       await supabase.from('patrons').delete().eq('id', boutique.id);
 
       showToast(`Boutique "${boutique.nom_boutique}" supprimée définitivement`, 'info');

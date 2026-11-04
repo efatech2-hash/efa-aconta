@@ -572,7 +572,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       sessionStorage.setItem('efa_patron_pin', newPin);
       try {
         await supabase.from('patrons').update({ pin_hash: hashed, pin_code: newPin, code_pin: newPin }).eq('id', patron.id);
-        await supabase.from('efa_boutiques').update({ pin_patron_hash: hashed, pin_code: newPin }).eq('id', patron.id);
       } catch {}
       await queueSyncItem('patrons', 'update', patron.id, updated);
       onPatronUpdated(updated);
@@ -626,7 +625,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       sessionStorage.setItem('efa_patron_pin', otpResetNewPin);
       try {
         await supabase.from('patrons').update({ pin_hash: hashed, pin_code: otpResetNewPin, code_pin: otpResetNewPin }).eq('id', patron.id);
-        await supabase.from('efa_boutiques').update({ pin_patron_hash: hashed, pin_code: otpResetNewPin }).eq('id', patron.id);
       } catch {}
       await queueSyncItem('patrons', 'update', patron.id, updated);
       onPatronUpdated(updated);

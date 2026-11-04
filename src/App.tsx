@@ -123,10 +123,7 @@ export default function App() {
 
   const [isPinLocked, setIsPinLocked] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      return (
-        localStorage.getItem('efa_aconta_locked') === 'true' ||
-        window.location.pathname === '/pin-lock'
-      );
+      return localStorage.getItem('efa_aconta_locked') === 'true';
     }
     return false;
   });
@@ -367,9 +364,9 @@ export default function App() {
       // 3. Synchronisation distante si en ligne
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         try {
-          // Essai dans table efa_boutiques (Zéro Email)
+          // Synchronisation distante depuis la table boutiques
           const { data: bData } = await withTimeout(
-            supabase.from('efa_boutiques').select('*').eq('id', currentBoutiqueId).limit(1).maybeSingle(),
+            supabase.from('boutiques').select('*').eq('id', currentBoutiqueId).limit(1).maybeSingle(),
             4000
           );
           if (bData) {
@@ -584,7 +581,6 @@ export default function App() {
     if (!patron) return;
     localStorage.setItem('efa_aconta_locked', 'true');
     setIsPinLocked(true);
-    if (typeof window !== 'undefined' && window.location.pathname !== '/pin-lock') window.history.pushState(null, '', '/pin-lock');
   }, [patron]);
 
   useEffect(() => {
@@ -613,7 +609,11 @@ export default function App() {
   }, [patron, lockApp]);
 
   useEffect(() => {
-    const handlePopState = () => { if (window.location.pathname === '/pin-lock') setIsPinLocked(true); };
+    const handlePopState = () => {
+      if (typeof window !== 'undefined' && localStorage.getItem('efa_aconta_locked') === 'true') {
+        setIsPinLocked(true);
+      }
+    };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
@@ -623,9 +623,6 @@ export default function App() {
     setCurrentUser(unlockedUser);
     localStorage.setItem('efa_active_user_id', unlockedUser.id);
     setIsPinLocked(false);
-    if (typeof window !== 'undefined' && (window.location.pathname === '/pin-lock' || window.location.pathname === '/lock')) {
-      window.history.pushState(null, '', '/');
-    }
     setActiveTab('home');
   };
 
@@ -643,9 +640,6 @@ export default function App() {
     setIsLockScreenOpen(false);
     setIsSettingsOpen(false);
     setIsAutoLogoutPromptOpen(false);
-    if (typeof window !== 'undefined' && window.location.pathname !== '/lock' && window.location.pathname !== '/pin-lock') {
-      window.history.pushState(null, '', '/lock');
-    }
   }, []);
 
   const handleLogout = useCallback(() => {
