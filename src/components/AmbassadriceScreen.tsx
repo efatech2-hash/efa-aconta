@@ -50,8 +50,8 @@ export const AmbassadriceScreen: React.FC<AmbassadriceScreenProps> = ({
   // Code Parrain Officiel
   const referralCode = patron.referral_code || (patron as any).code_parrain || 'EFA-ACONTA';
 
-  // Lien officiel de parrainage demandé : https://efa-akonta.vercel.app?ref=VOTRE_CODE
-  const lienInviteUrl = `https://efa-akonta.vercel.app?ref=${referralCode}`;
+  // Lien officiel de parrainage : https://efa-aconta.vercel.app?ref=VOTRE_CODE
+  const lienInviteUrl = `https://efa-aconta.vercel.app?ref=${referralCode}`;
 
   // Récupération dynamique des filleuls rattachés à ce code parrain
   useEffect(() => {

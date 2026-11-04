@@ -54,7 +54,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     : (currentUser.genre === 'femme' ? 'Bienvenue vendeuse' : 'Bienvenu vendeur');
 
   const referralCode = patron.referral_code || (patron as any).code_parrain || 'EFA-ACONTA';
-  const referralLink = `https://efa-akonta.vercel.app?ref=${referralCode}`;
+  const referralLink = `https://efa-aconta.vercel.app?ref=${referralCode}`;
   const [copiedLink, setCopiedLink] = React.useState(false);
 
   const handleCopyLink = () => {
@@ -413,7 +413,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                     Ton lien de parrainage :
                   </span>
                   <code className="text-xs sm:text-sm font-mono font-black text-amber-300 truncate">
-                    efa-akonta.vercel.app?ref={referralCode}
+                    efa-aconta.vercel.app?ref={referralCode}
                   </code>
                 </div>
 
