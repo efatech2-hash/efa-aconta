@@ -744,6 +744,11 @@ app.post('/api/validate/employee', (req: Request, res: Response) => {
 // ==============================================================================
 app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Response) => {
   try {
+    const { data: centralBoutiques } = await supabase
+      .from('boutiques')
+      .select('*')
+      .order('created_at', { ascending: false });
+
     const { data: efaBoutiques } = await supabase
       .from('efa_boutiques')
       .select('*')
@@ -756,8 +761,34 @@ app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Res
 
     const combinedMap = new Map<string, any>();
 
+    if (centralBoutiques) {
+      for (const b of centralBoutiques) {
+        const subEnd = b.subscription_end || b.date_fin_essai;
+        const now = new Date();
+        const isExp = subEnd ? new Date(subEnd) < now : false;
+        const status = b.is_active === false ? 'bloque' : isExp ? 'expire' : (b.status || 'actif');
+
+        combinedMap.set(b.id, {
+          id: b.id,
+          nom_personne: b.proprietaire || b.nom_patron || 'Patron',
+          nom_boutique: b.nom_boutique || 'Ma Boutique',
+          pin_code: b.pin_code || '----',
+          quartier: b.quartier || '',
+          telephone: b.telephone || '',
+          status,
+          is_active: b.is_active !== false,
+          subscription_end: subEnd || null,
+          plan: b.plan || 'essai',
+          last_payment_amount: b.last_payment_amount || 0,
+          created_at: b.created_at || new Date().toISOString(),
+          source: 'boutiques',
+        });
+      }
+    }
+
     if (patronsData) {
       for (const p of patronsData) {
+        if (combinedMap.has(p.id)) continue;
         const subEnd = p.subscription_end_date || p.abonnement_expire || p.trial_end_date;
         const now = new Date();
         const isExp = subEnd ? new Date(subEnd) < now : false;
@@ -783,7 +814,7 @@ app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Res
 
     if (efaBoutiques) {
       for (const b of efaBoutiques) {
-        const existing = combinedMap.get(b.id);
+        if (combinedMap.has(b.id)) continue;
         const subEnd = b.date_fin_essai;
         const now = new Date();
         const isExp = subEnd ? new Date(subEnd) < now : false;
@@ -791,16 +822,16 @@ app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Res
 
         combinedMap.set(b.id, {
           id: b.id,
-          nom_personne: b.nom_patron || existing?.nom_personne || b.nom_affichage,
+          nom_personne: b.nom_patron || b.nom_affichage,
           nom_boutique: b.nom_affichage || b.nom_boutique,
-          pin_code: b.pin_code || existing?.pin_code || '----',
-          quartier: b.quartier || existing?.quartier || '',
-          telephone: existing?.telephone || '',
+          pin_code: b.pin_code || '----',
+          quartier: b.quartier || '',
+          telephone: '',
           status,
           is_active: b.is_active !== false,
-          subscription_end: subEnd || existing?.subscription_end || null,
+          subscription_end: subEnd || null,
           plan: b.plan || 'essai',
-          last_payment_amount: b.last_payment_amount || existing?.last_payment_amount || 0,
+          last_payment_amount: b.last_payment_amount || 0,
           created_at: b.created_at || new Date().toISOString(),
           source: 'efa_boutiques',
         });
@@ -845,6 +876,19 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
 
     try {
       await supabase
+        .from('boutiques')
+        .update({
+          plan,
+          subscription_end: expiryDate,
+          is_active: true,
+          status: 'actif',
+          last_payment_amount: amount,
+        })
+        .eq('id', boutique_id);
+    } catch (e) {}
+
+    try {
+      await supabase
         .from('efa_boutiques')
         .update({
           plan,
@@ -879,6 +923,38 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
       });
     } catch (e) {}
 
+    // Règle d'or Parrainage : Bonus +2 Mois pour Parrain ET Filleul si 1 AN payé
+    if (duration_days >= 360 || plan.includes('annuel') || amount === 90000 || amount === 16500) {
+      try {
+        // Tentative RPC Supabase
+        const { data: rpcRes } = await (supabase.rpc as any)('reward_referral_bonus', { target_filleul_id: boutique_id });
+        if (!rpcRes?.success) {
+          // Fallback direct tables
+          const { data: refRow } = await supabase.from('referrals').select('*').eq('filleul_id', boutique_id).maybeSingle();
+          if (refRow && !refRow.reward_given) {
+            await supabase.from('referrals').update({ status: 'paid', reward_given: true, reward_date: new Date().toISOString() }).eq('id', refRow.id);
+
+            // Extension +2 mois (+60j) pour le parrain
+            const { data: parrainBtq } = await supabase.from('boutiques').select('subscription_end, subscription_end_date').eq('id', refRow.parrain_id).maybeSingle();
+            const now = new Date();
+            let pBase = now;
+            const pEnd = parrainBtq?.subscription_end_date || parrainBtq?.subscription_end;
+            if (pEnd && new Date(pEnd) > now) pBase = new Date(pEnd);
+            const pNewEnd = new Date(pBase.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
+            await supabase.from('boutiques').update({ subscription_end: pNewEnd, subscription_end_date: pNewEnd, is_active: true, status: 'actif' }).eq('id', refRow.parrain_id);
+            await supabase.from('profiles').update({ subscription_end_date: pNewEnd }).eq('id', refRow.parrain_id);
+
+            // Extension +2 mois (+60j) pour le filleul
+            const fNewEnd = new Date(new Date(expiryDate).getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
+            await supabase.from('boutiques').update({ subscription_end: fNewEnd, subscription_end_date: fNewEnd, is_active: true, status: 'actif' }).eq('id', boutique_id);
+            await supabase.from('profiles').update({ subscription_end_date: fNewEnd }).eq('id', boutique_id);
+          }
+        }
+      } catch (refEx) {
+        console.warn('[Backend] Erreur reward referral:', refEx);
+      }
+    }
+
     return res.json({
       success: true,
       message: `Boutique activée pour ${duration_days} jours avec succès`,
@@ -895,10 +971,12 @@ app.post('/api/admin/boutiques/toggle-status', requireAdminAuth, async (req: Req
     const { boutique_id, is_active } = req.body || {};
     if (!boutique_id) return res.status(400).json({ error: 'boutique_id requis' });
 
-    await supabase.from('efa_boutiques').update({ is_active: Boolean(is_active) }).eq('id', boutique_id);
-    await supabase.from('patrons').update({ is_active: Boolean(is_active) }).eq('id', boutique_id);
+    const newActive = Boolean(is_active);
+    await supabase.from('boutiques').update({ is_active: newActive, status: newActive ? 'actif' : 'bloque' }).eq('id', boutique_id);
+    await supabase.from('efa_boutiques').update({ is_active: newActive }).eq('id', boutique_id);
+    await supabase.from('patrons').update({ is_active: newActive }).eq('id', boutique_id);
 
-    return res.json({ success: true, is_active: Boolean(is_active) });
+    return res.json({ success: true, is_active: newActive });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -914,6 +992,10 @@ app.post('/api/admin/boutiques/prolong', requireAdminAuth, async (req: Request, 
       const daysToAdd = Math.max(1, Math.min(parseInt(add_days, 10) || 30, 3650));
       newEnd = new Date(Date.now() + daysToAdd * 86400000).toISOString();
     }
+
+    try {
+      await supabase.from('boutiques').update({ subscription_end: newEnd, is_active: true, status: 'actif' }).eq('id', boutique_id);
+    } catch {}
 
     try {
       await supabase.from('efa_boutiques').update({ date_fin_essai: newEnd, is_active: true }).eq('id', boutique_id);
@@ -941,6 +1023,7 @@ app.delete('/api/admin/boutiques/:id', requireAdminAuth, async (req: Request, re
     const id = req.params.id;
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'ID invalide' });
 
+    await supabase.from('boutiques').delete().eq('id', id);
     await supabase.from('efa_boutiques').delete().eq('id', id);
     await supabase.from('patrons').delete().eq('id', id);
     return res.json({ success: true });

@@ -16,6 +16,10 @@ import {
   FileCheck2,
   Headset,
   Store,
+  Share2,
+  Copy,
+  Check,
+  MessageCircle,
 } from 'lucide-react';
 import type { Patron, CurrentUser } from '../lib/types';
 import { getAccord } from '../lib/accord';
@@ -48,6 +52,25 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const welcomePrefix = isPatron
     ? (patron.genre === 'femme' ? 'Bienvenue patronne' : 'Bienvenu patron')
     : (currentUser.genre === 'femme' ? 'Bienvenue vendeuse' : 'Bienvenu vendeur');
+
+  const referralCode = patron.referral_code || (patron as any).code_parrain || 'EFA-ACONTA';
+  const referralLink = `https://efa-akonta.vercel.app?ref=${referralCode}`;
+  const [copiedLink, setCopiedLink] = React.useState(false);
+
+  const handleCopyLink = () => {
+    if (navigator?.clipboard) {
+      navigator.clipboard.writeText(referralLink);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    }
+  };
+
+  const handleShareWhatsApp = () => {
+    const text = encodeURIComponent(
+      `Bonjour ! Rejoins-moi sur EFA Aconta pour gérer ta boutique et ta caisse facilement. Inscris-toi ici : ${referralLink}`
+    );
+    window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
+  };
 
   return (
     <div className="space-y-6 pb-28 select-none">
@@ -348,6 +371,83 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 <span>Voir les Forfaits</span>
                 <ChevronRight className="w-4 h-4 stroke-[3]" />
               </button>
+            </div>
+          )}
+
+          {/* SECTION PARRAINAGE : TON LIEN DE PARRAINAGE & WHATSAPP (+2 MOIS GRATUITS) */}
+          {isPatron && !isSubStore && (
+            <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-emerald-900 via-teal-900 to-emerald-950 text-white shadow-xl border-2 border-emerald-400/40 space-y-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-emerald-400/20 border border-emerald-400/50 text-emerald-300 flex items-center justify-center flex-shrink-0">
+                    <Gift className="w-6 h-6 text-emerald-300" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-black text-base sm:text-lg text-white">
+                        Programme Parrainage Ambassadrice
+                      </h4>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase shadow-xs">
+                        +2 Mois Free
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-emerald-200">
+                      Gagnez <strong className="text-amber-300">+2 MOIS GRATUITS</strong> (+60 jours) pour chaque commerçante qui prend 1 AN !
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => onNavigate('ambassadrice')}
+                  className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-emerald-200 text-xs font-bold transition w-fit"
+                >
+                  Détails & Filleuls ➔
+                </button>
+              </div>
+
+              {/* Barre de partage du lien */}
+              <div className="bg-slate-950/60 rounded-2xl p-2.5 sm:p-3 border border-emerald-500/30 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2 overflow-hidden px-2 py-1">
+                  <span className="text-xs font-bold text-slate-400 whitespace-nowrap">
+                    Ton lien de parrainage :
+                  </span>
+                  <code className="text-xs sm:text-sm font-mono font-black text-amber-300 truncate">
+                    efa-akonta.vercel.app?ref={referralCode}
+                  </code>
+                </div>
+
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {/* Bouton Copier */}
+                  <button
+                    type="button"
+                    onClick={handleCopyLink}
+                    className="flex-1 sm:flex-none px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-white font-black text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition cursor-pointer"
+                  >
+                    {copiedLink ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
+                        <span className="text-emerald-400">Copié !</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copier</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Bouton Partager WhatsApp */}
+                  <button
+                    type="button"
+                    onClick={handleShareWhatsApp}
+                    className="flex-1 sm:flex-none px-4 py-2 rounded-xl bg-[#25D366] hover:bg-[#20ba59] active:scale-95 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-md transition cursor-pointer"
+                  >
+                    <MessageCircle className="w-4 h-4 fill-white text-white" />
+                    <span>Partager WhatsApp</span>
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

@@ -187,9 +187,27 @@ export async function createSubBoutique({
     // 1. Sauvegarde locale dans Dexie
     await db.patrons.put(subPatron);
 
-    // 2. Synchronisation distante avec efa_boutiques et patrons
+    // 2. Synchronisation distante avec boutiques, efa_boutiques et patrons
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine) {
+        await supabase.from('boutiques').insert({
+          id: subId,
+          nom_boutique: finalNom,
+          proprietaire: mainPatron.nom || 'Patron',
+          email: mainPatron.email || '',
+          telephone: mainPatron.telephone || '',
+          created_at: nowIso,
+          user_id: mainStoreId,
+          status: 'actif',
+          nom: finalNom,
+          patron_id: subId,
+          pin_code: mainPatron.pin_code || mainPatron.code_pin,
+          plan: 'pro',
+          subscription_end: mainPatron.fin_abonnement || mainPatron.subscription_end_date || nowIso,
+          is_active: true,
+          last_payment_amount: 0,
+        });
+
         await supabase.from('efa_boutiques').insert({
           id: subId,
           nom_boutique: finalNom.toLowerCase().replace(/[^a-z0-9]/g, '-'),

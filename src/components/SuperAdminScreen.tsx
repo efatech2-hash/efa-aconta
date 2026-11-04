@@ -25,10 +25,16 @@ import {
   ArrowLeft,
   Crown,
   Award,
+  Gift,
+  Users,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { db } from '../lib/db';
-import { checkAndGiveReferralBonus, getTotalAnnualReferralsCount } from '../lib/ambassadeur';
+import {
+  checkAndGiveReferralBonus,
+  getTotalAnnualReferralsCount,
+  getReferralsListCentral,
+  type CentralReferralRow,
+} from '../lib/ambassadeur';
 
 export interface AdminBoutique {
   id: string;
@@ -73,7 +79,11 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Données Dashboard
+  const [activeView, setActiveView] = useState<'boutiques' | 'referrals'>('boutiques');
   const [boutiques, setBoutiques] = useState<AdminBoutique[]>([]);
+  const [referrals, setReferrals] = useState<CentralReferralRow[]>([]);
+  const [isLoadingReferrals, setIsLoadingReferrals] = useState(false);
+  const [referralsSearch, setReferralsSearch] = useState('');
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'actif' | 'expire' | 'bloque'>('all');
@@ -99,6 +109,43 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3500);
+  };
+
+  const loadReferrals = async () => {
+    setIsLoadingReferrals(true);
+    try {
+      const list = await getReferralsListCentral();
+      setReferrals(list);
+    } catch (e) {
+      console.warn('[SUPER ADMIN] Erreur chargement referrals:', e);
+    } finally {
+      setIsLoadingReferrals(false);
+    }
+  };
+
+  const handleValidateReferralBonus = async (ref: CentralReferralRow) => {
+    try {
+      const res = await checkAndGiveReferralBonus({
+        id: ref.filleul_id,
+        nom_boutique: ref.filleul_nom,
+        plan: ref.filleul_plan || 'pro_annuel',
+        duration_days: 365,
+        last_payment_amount: 90000,
+        referred_by: ref.parrain_code || ref.parrain_id,
+      });
+
+      if (res.success) {
+        showToast(
+          `Bonus +2 mois validé avec succès pour ${ref.filleul_nom || 'le filleul'} et ${ref.parrain_nom || 'le parrain'} !`,
+          'success'
+        );
+        await Promise.all([loadBoutiques(), loadReferrals()]);
+      } else {
+        showToast(res.reason || 'Impossible de valider le bonus', 'error');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erreur validation bonus', 'error');
+    }
   };
 
   const adminFetch = (url: string, options: RequestInit = {}) => {
@@ -192,158 +239,121 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     showToast('Déconnexion effectuée', 'info');
   };
 
+  // Helper pour formater une ligne Supabase en AdminBoutique
+  const formatBoutiqueRow = (row: any): AdminBoutique => {
+    const subEnd = row.subscription_end || row.date_fin_essai || row.fin_abonnement || row.subscription_end_date || null;
+    const now = new Date();
+    const isExp = subEnd ? new Date(subEnd) < now : false;
+    const status =
+      row.is_active === false
+        ? 'bloque'
+        : isExp
+        ? 'expire'
+        : (row.status === 'bloque' ? 'bloque' : (row.status || 'actif'));
+
+    return {
+      id: row.id,
+      nom_personne: row.proprietaire || row.nom_patron || row.nom_personne || row.nom || 'Patron',
+      nom_boutique: row.nom_boutique || row.nom_affichage || row.nom || 'Ma Boutique',
+      pin_code: row.pin_code || row.code_pin || '----',
+      quartier: row.quartier || row.adresse || '',
+      telephone: row.telephone || row.email || '',
+      status,
+      is_active: row.is_active !== false,
+      subscription_end: subEnd,
+      plan: row.plan || row.forfait || 'essai',
+      last_payment_amount: Number(row.last_payment_amount) || 0,
+      created_at: row.created_at || new Date().toISOString(),
+      source: 'boutiques',
+      referral_code: row.referral_code,
+      referred_by: row.referred_by || null,
+      referral_bonus_given: Boolean(row.referral_bonus_given),
+      has_paid_annuel: Boolean(row.has_paid_annuel),
+      referrals_count: Number(row.referrals_count) || 0,
+      bonus_days_earned: Number(row.bonus_days_earned) || 0,
+    };
+  };
+
   // ============================================================================
-  // CHARGEMENT DES BOUTIQUES DEPUIS SUPABASE ET DEXIE
+  // CHARGEMENT CENTRALISÉ DES BOUTIQUES DEPUIS SUPABASE (ZÉRO LOCALSTORAGE)
   // ============================================================================
   const loadBoutiques = async () => {
     setIsLoadingData(true);
     try {
-      // 1. Tenter par l'API backend sécurisée avec token
-      let loadedFromApi = false;
-      try {
-        const resp = await adminFetch('/api/admin/boutiques');
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.success && Array.isArray(data.boutiques)) {
-            setBoutiques(data.boutiques);
-            loadedFromApi = true;
-          }
-        } else if (resp.status === 401) {
-          handleLogout();
-          return;
-        }
-      } catch {}
+      // 1. Requête principale centrale sur la table Supabase 'boutiques'
+      const { data: centralData, error: centralErr } = await supabase
+        .from('boutiques')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      // 2. Si pas d'API backend, interroger directement Supabase (et Dexie local)
-      if (!loadedFromApi) {
-        const [efaRes, patronsRes, localPatrons] = await Promise.all([
-          supabase.from('efa_boutiques').select('*').order('created_at', { ascending: false }),
-          supabase.from('patrons').select('*').order('created_at', { ascending: false }),
-          db.patrons.toArray().catch(() => []),
-        ]);
-
-        const combined = new Map<string, AdminBoutique>();
-
-        // Intégrer Dexie local
-        if (Array.isArray(localPatrons)) {
-          for (const lp of localPatrons) {
-            const subEnd = (lp as any).fin_abonnement || lp.subscription_end_date || lp.abonnement_expire || lp.trial_end_date;
-            const now = new Date();
-            const isExp = subEnd ? new Date(subEnd) < now : false;
-            const plan = (lp as any).forfait || lp.subscription_status || 'essai';
-            combined.set(lp.id, {
-              id: lp.id,
-              nom_personne: lp.nom || 'Patron',
-              nom_boutique: lp.nom_boutique || 'Ma Boutique',
-              pin_code: lp.pin_code || lp.code_pin || '----',
-              quartier: lp.telephone || '',
-              telephone: lp.telephone || '',
-              status: isExp ? 'expire' : (lp.subscription_status || 'actif'),
-              is_active: true,
-              subscription_end: subEnd || null,
-              plan,
-              last_payment_amount: 0,
-              created_at: lp.created_at,
-              source: 'local',
-              referral_code: lp.referral_code || (lp as any).code_parrain,
-              referred_by: lp.referred_by || null,
-              referral_bonus_given: lp.referral_bonus_given || false,
-              has_paid_annuel: lp.has_paid_annuel || false,
-              referrals_count: lp.referrals_count || 0,
-              bonus_days_earned: lp.bonus_days_earned || 0,
-            });
-          }
-        }
-
-        // Intégrer table patrons Supabase
-        if (patronsRes.data) {
-          for (const p of patronsRes.data) {
-            const subEnd = p.fin_abonnement || p.subscription_end_date || p.abonnement_expire || p.trial_end_date;
-            const now = new Date();
-            const isExp = subEnd ? new Date(subEnd) < now : false;
-            const plan = p.forfait || p.subscription_status || 'essai';
-            const status =
-              p.is_active === false
-                ? 'bloque'
-                : isExp
-                ? 'expire'
-                : (p.statut === 'ACTIF' ? 'actif' : (p.subscription_status || 'actif'));
-
-            combined.set(p.id, {
-              id: p.id,
-              nom_personne: p.nom || 'Patron',
-              nom_boutique: p.nom_boutique || 'Ma Boutique',
-              pin_code: p.pin_code || p.code_pin || '----',
-              quartier: p.quartier || '',
-              telephone: p.telephone || p.phone_full || '',
-              status,
-              is_active: p.is_active !== false,
-              subscription_end: subEnd || null,
-              plan,
-              last_payment_amount: p.last_payment_amount || 0,
-              created_at: p.created_at,
-              source: 'patrons',
-              referral_code: p.referral_code || (p as any).code_parrain,
-              referred_by: p.referred_by || null,
-              referral_bonus_given: p.referral_bonus_given || false,
-              has_paid_annuel: p.has_paid_annuel || false,
-              referrals_count: p.referrals_count || 0,
-              bonus_days_earned: p.bonus_days_earned || 0,
-            });
-          }
-        }
-
-        // Intégrer table efa_boutiques Supabase
-        if (efaRes.data) {
-          for (const b of efaRes.data) {
-            const existing = combined.get(b.id);
-            const subEnd = b.date_fin_essai || (b as any).fin_abonnement || existing?.subscription_end;
-            const now = new Date();
-            const isExp = subEnd ? new Date(subEnd) < now : false;
-            const plan = (b as any).forfait || b.plan || existing?.plan || 'essai';
-            const status =
-              b.is_active === false ? 'bloque' : isExp ? 'expire' : ((b as any).statut === 'ACTIF' ? 'actif' : (b.plan || 'actif'));
-
-            combined.set(b.id, {
-              id: b.id,
-              nom_personne: b.nom_patron || existing?.nom_personne || b.nom_affichage,
-              nom_boutique: b.nom_affichage || b.nom_boutique,
-              pin_code: b.pin_code || existing?.pin_code || '----',
-              quartier: b.quartier || existing?.quartier || '',
-              telephone: existing?.telephone || '',
-              status,
-              is_active: b.is_active !== false,
-              subscription_end: subEnd || null,
-              plan,
-              last_payment_amount: b.last_payment_amount || existing?.last_payment_amount || 0,
-              created_at: b.created_at,
-              source: 'efa_boutiques',
-              referral_code: b.referral_code || existing?.referral_code,
-              referred_by: b.referred_by || existing?.referred_by || null,
-              referral_bonus_given: (b as any).referral_bonus_given || existing?.referral_bonus_given || false,
-              has_paid_annuel: (b as any).has_paid_annuel || existing?.has_paid_annuel || false,
-              referrals_count: (b as any).referrals_count || existing?.referrals_count || 0,
-              bonus_days_earned: (b as any).bonus_days_earned || existing?.bonus_days_earned || 0,
-            });
-          }
-        }
-
-        const list = Array.from(combined.values());
-        const codeToName = new Map<string, string>();
-        for (const item of list) {
-          if (item.referral_code) {
-            codeToName.set(item.referral_code.toUpperCase(), item.nom_boutique || item.nom_personne);
-          }
-        }
-        for (const item of list) {
-          if (item.referred_by) {
-            item.parrain_nom = codeToName.get(item.referred_by.toUpperCase());
-          }
-        }
-
-        setBoutiques(list);
-        getTotalAnnualReferralsCount().then(setAnnualReferralsCount).catch(() => {});
+      if (centralErr) {
+        console.warn('[SUPER ADMIN] Note requête boutiques:', centralErr);
       }
+
+      // 2. Requête miroir sur efa_boutiques et patrons Supabase (ZÉRO lecture Dexie/localStorage)
+      const [efaRes, patronsRes] = await Promise.all([
+        supabase.from('efa_boutiques').select('*').order('created_at', { ascending: false }),
+        supabase.from('patrons').select('*').order('created_at', { ascending: false }),
+      ]);
+
+      const combined = new Map<string, AdminBoutique>();
+
+      // Intégrer table centrale 'boutiques'
+      if (Array.isArray(centralData)) {
+        for (const row of centralData) {
+          combined.set(row.id, formatBoutiqueRow(row));
+        }
+      }
+
+      // Compléter avec efa_boutiques
+      if (Array.isArray(efaRes.data)) {
+        for (const b of efaRes.data) {
+          if (!combined.has(b.id)) {
+            combined.set(b.id, formatBoutiqueRow({
+              ...b,
+              nom_boutique: b.nom_affichage || b.nom_boutique,
+              proprietaire: b.nom_patron,
+              subscription_end: b.date_fin_essai,
+            }));
+          }
+        }
+      }
+
+      // Compléter avec patrons
+      if (Array.isArray(patronsRes.data)) {
+        for (const p of patronsRes.data) {
+          if (!combined.has(p.id)) {
+            combined.set(p.id, formatBoutiqueRow({
+              ...p,
+              nom_boutique: p.nom_boutique,
+              proprietaire: p.nom,
+              subscription_end: p.fin_abonnement || p.subscription_end_date || p.abonnement_expire || p.trial_end_date,
+            }));
+          }
+        }
+      }
+
+      const list = Array.from(combined.values());
+      list.sort((a, b) => {
+        const da = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const db = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return db - da;
+      });
+
+      const codeToName = new Map<string, string>();
+      for (const item of list) {
+        if (item.referral_code) {
+          codeToName.set(item.referral_code.toUpperCase(), item.nom_boutique || item.nom_personne);
+        }
+      }
+      for (const item of list) {
+        if (item.referred_by) {
+          item.parrain_nom = codeToName.get(item.referred_by.toUpperCase());
+        }
+      }
+
+      setBoutiques(list);
+      getTotalAnnualReferralsCount().then(setAnnualReferralsCount).catch(() => {});
     } catch (err: any) {
       console.error('[SUPER ADMIN] Erreur chargement:', err);
       showToast('Erreur lors du chargement des boutiques', 'error');
@@ -352,10 +362,75 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     }
   };
 
+  // ============================================================================
+  // ABONNEMENT REAL-TIME SUPABASE POUR APPARITION INSTANTANÉE SUR TOUS LES APPAREILS
+  // ============================================================================
   useEffect(() => {
-    if (isAuthenticated) {
-      loadBoutiques();
-    }
+    if (!isAuthenticated) return;
+
+    loadBoutiques();
+    loadReferrals();
+
+    const channel = supabase
+      .channel('boutiques_realtime_changes')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'boutiques' },
+        (payload) => {
+          console.log('[REALTIME] Nouvelle boutique insérée:', payload.new);
+          if (payload.new) {
+            const newRow = formatBoutiqueRow(payload.new);
+            setBoutiques((prev) => {
+              if (prev.some((b) => b.id === newRow.id)) return prev;
+              return [newRow, ...prev];
+            });
+            showToast(`Nouvelle boutique connectée : ${newRow.nom_boutique} !`, 'info');
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'boutiques' },
+        (payload) => {
+          console.log('[REALTIME] Boutique mise à jour:', payload.new);
+          if (payload.new) {
+            const updatedRow = formatBoutiqueRow(payload.new);
+            setBoutiques((prev) =>
+              prev.map((b) => (b.id === updatedRow.id ? { ...b, ...updatedRow } : b))
+            );
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'boutiques' },
+        (payload) => {
+          console.log('[REALTIME] Boutique supprimée:', payload.old);
+          if (payload.old?.id) {
+            setBoutiques((prev) => prev.filter((b) => b.id !== payload.old.id));
+          }
+        }
+      )
+      .subscribe();
+
+    // Abonnements Realtime sur la table centrale 'referrals'
+    const referralsChannel = supabase
+      .channel('referrals_realtime_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'referrals' },
+        (payload) => {
+          console.log('[REALTIME REFERRALS] Changement détecté:', payload);
+          loadReferrals();
+          getTotalAnnualReferralsCount().then(setAnnualReferralsCount).catch(() => {});
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+      supabase.removeChannel(referralsChannel);
+    };
   }, [isAuthenticated]);
 
   // ============================================================================
@@ -407,7 +482,18 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         });
       } catch {}
 
-      // 2. Mettre à jour Supabase direct
+      // 2. Mettre à jour Supabase direct (table boutiques centrale en priorité)
+      await supabase
+        .from('boutiques')
+        .update({
+          plan: planCode,
+          subscription_end: expiryDate,
+          is_active: true,
+          status: 'actif',
+          last_payment_amount: amount,
+        } as any)
+        .eq('id', boutique.id);
+
       await supabase
         .from('efa_boutiques')
         .update({
@@ -434,21 +520,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
           last_payment_amount: amount,
         } as any)
         .eq('id', boutique.id);
-
-      // 3. Mettre à jour Dexie local si présent
-      try {
-        const localPatron = await db.patrons.get(boutique.id);
-        if (localPatron) {
-          await db.patrons.update(boutique.id, {
-            subscription_status: targetStatus,
-            subscription_end_date: expiryDate,
-            abonnement_expire: expiryDate,
-            fin_abonnement: expiryDate,
-            forfait: planCode,
-            statut: 'ACTIF',
-          } as any);
-        }
-      } catch {}
 
       // 4. Mettre à jour immédiatement le state local React
       setBoutiques((prev) =>
@@ -513,6 +584,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         });
       } catch {}
 
+      await supabase.from('boutiques').update({ is_active: newActiveState, status: newActiveState ? 'actif' : 'bloque' } as any).eq('id', boutique.id);
       await supabase.from('efa_boutiques').update({ is_active: newActiveState }).eq('id', boutique.id);
       await supabase.from('patrons').update({ is_active: newActiveState }).eq('id', boutique.id);
 
@@ -540,8 +612,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         ancienneDateFin = now;
       }
 
-      // Si l'abonnement est déjà expiré (fin < aujourd'hui), alors nouvelle_date = aujourd'hui + 30 jours
-      // Sinon nouvelle_date = ancienne_date_fin + 30 jours
       const baseDate = ancienneDateFin > now ? ancienneDateFin : now;
       const nouvelleDate = new Date(baseDate.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
       const nouvelleDateIso = nouvelleDate.toISOString();
@@ -549,7 +619,20 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
       console.log("Prolongation OK", nouvelleDate);
 
-      // 1. Update Supabase table patrons : fin_abonnement = nouvelle_date.toISOString(), statut = 'ACTIF', forfait = 'PROLONGE'
+      // 1. Update Supabase table boutiques
+      try {
+        await supabase
+          .from('boutiques')
+          .update({
+            subscription_end: nouvelleDateIso,
+            is_active: true,
+            status: 'actif',
+            plan: 'PROLONGE',
+          } as any)
+          .eq('id', boutique.id);
+      } catch (errB) {}
+
+      // 2. Update Supabase table patrons
       try {
         await supabase
           .from('patrons')
@@ -563,21 +646,9 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             subscription_status: 'populaire',
           } as any)
           .eq('id', boutique.id);
-      } catch (errP) {
-        try {
-          await supabase
-            .from('patrons')
-            .update({
-              fin_abonnement: nouvelleDateIso,
-              subscription_end_date: nouvelleDateIso,
-              abonnement_expire: nouvelleDateIso,
-              is_active: true,
-            } as any)
-            .eq('id', boutique.id);
-        } catch {}
-      }
+      } catch (errP) {}
 
-      // 2. Update Supabase table efa_boutiques
+      // 3. Update Supabase table efa_boutiques
       try {
         await supabase
           .from('efa_boutiques')
@@ -586,18 +657,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             is_active: true,
           })
           .eq('id', boutique.id);
-      } catch (e) {}
-
-      // 3. Update Dexie local si présent
-      try {
-        await db.patrons.update(boutique.id, {
-          fin_abonnement: nouvelleDateIso,
-          subscription_end_date: nouvelleDateIso,
-          abonnement_expire: nouvelleDateIso,
-          is_active: true,
-          forfait: 'PROLONGE',
-          subscription_status: 'populaire',
-        } as any);
       } catch (e) {}
 
       // 4. Update Backend API
@@ -659,10 +718,11 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         await adminFetch(`/api/admin/boutiques/${boutique.id}`, { method: 'DELETE' });
       } catch {}
 
+      await supabase.from('boutiques').delete().eq('id', boutique.id);
       await supabase.from('efa_boutiques').delete().eq('id', boutique.id);
       await supabase.from('patrons').delete().eq('id', boutique.id);
 
-      showToast(`Boutique "${boutique.nom_boutique}" supprimée`, 'info');
+      showToast(`Boutique "${boutique.nom_boutique}" supprimée définitivement`, 'info');
       await loadBoutiques();
     } catch (err: any) {
       showToast('Erreur lors de la suppression', 'error');
@@ -724,6 +784,19 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       return matchNom || matchBoutique || matchQuartier || matchPhone || matchPin;
     });
   }, [boutiques, searchQuery, statusFilter]);
+
+  const filteredReferrals = useMemo(() => {
+    const q = referralsSearch.trim().toLowerCase();
+    if (!q) return referrals;
+    return referrals.filter((r) => {
+      const pNom = (r.parrain_nom || '').toLowerCase();
+      const pCode = (r.parrain_code || '').toLowerCase();
+      const fNom = (r.filleul_nom || '').toLowerCase();
+      const fCode = (r.filleul_code || '').toLowerCase();
+      const st = (r.status || '').toLowerCase();
+      return pNom.includes(q) || pCode.includes(q) || fNom.includes(q) || fCode.includes(q) || st.includes(q);
+    });
+  }, [referrals, referralsSearch]);
 
   // ============================================================================
   // RENDU 1 : FORMULAIRE DE CONNEXION SUPER ADMIN (SI NON CONNECTÉ)
@@ -1014,8 +1087,40 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
           </div>
         </div>
 
-        {/* b) BARRE DE RECHERCHE INSTANTANÉE & FILTRES */}
-        <div className="bg-white p-4 rounded-3xl border-2 border-slate-200 shadow-sm space-y-3">
+        {/* SÉLECTEUR D'ONGLET PRINCIPAL SUPER ADMIN */}
+        <div className="flex items-center gap-2 p-1.5 rounded-2xl bg-slate-900 w-fit">
+          <button
+            type="button"
+            onClick={() => setActiveView('boutiques')}
+            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black transition cursor-pointer flex items-center gap-2 ${
+              activeView === 'boutiques'
+                ? 'bg-amber-400 text-slate-950 shadow-md'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Store className="w-4 h-4" />
+            <span>Boutiques Réseau ({boutiques.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveView('referrals')}
+            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black transition cursor-pointer flex items-center gap-2 ${
+              activeView === 'referrals'
+                ? 'bg-amber-400 text-slate-950 shadow-md'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Gift className="w-4 h-4" />
+            <span>Parrainages & Bonus 2 Mois ({referrals.length})</span>
+          </button>
+        </div>
+
+        {/* VUE 1 : GESTION DES BOUTIQUES RÉSEAU */}
+        {activeView === 'boutiques' && (
+          <>
+            {/* b) BARRE DE RECHERCHE INSTANTANÉE & FILTRES */}
+            <div className="bg-white p-4 rounded-3xl border-2 border-slate-200 shadow-sm space-y-3">
           <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
             {/* Barre de recherche */}
             <div className="relative flex-1">
@@ -1568,6 +1673,180 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             </>
           )}
         </div>
+      </>
+    )}
+
+          {/* VUE 2 : TABLEAU DES PARRAINAGES & RÉCOMPENSES */}
+          {activeView === 'referrals' && (
+            <div className="space-y-4">
+              {/* Barre de recherche Parrainages */}
+              <div className="bg-white p-4 rounded-3xl border-2 border-slate-200 shadow-sm space-y-3">
+                <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
+                  <div className="relative flex-1">
+                    <Search className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Rechercher par nom parrain, filleul ou code (ex: EFA-XXXXX)..."
+                      value={referralsSearch}
+                      onChange={(e) => setReferralsSearch(e.target.value)}
+                      className="w-full pl-11 pr-4 py-3.5 rounded-2xl bg-slate-50 border-2 border-slate-200 text-slate-900 font-bold text-sm focus:border-indigo-500 focus:bg-white outline-none transition"
+                    />
+                    {referralsSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setReferralsSearch('')}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs font-black text-slate-600 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+                    <span>Total : {filteredReferrals.length} parrainage(s)</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Tableau Referrals */}
+              <div className="bg-white rounded-3xl border-2 border-slate-200 shadow-sm overflow-hidden">
+                {isLoadingReferrals ? (
+                  <div className="p-12 text-center space-y-3">
+                    <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto" />
+                    <p className="text-sm font-black text-slate-600">Chargement des parrainages...</p>
+                  </div>
+                ) : filteredReferrals.length === 0 ? (
+                  <div className="p-12 text-center space-y-2">
+                    <Gift className="w-12 h-12 text-slate-300 mx-auto" />
+                    <p className="text-base font-black text-slate-700">Aucun parrainage enregistré</p>
+                    <p className="text-xs text-slate-400">
+                      Les nouveaux parrainages apparaîtront ici automatiquement dès qu'un lien ?ref=CODE est utilisé.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-black uppercase tracking-wider text-slate-500">
+                          <th className="py-3.5 px-4">Date & Réf</th>
+                          <th className="py-3.5 px-4">Parrain (Bénéficiaire 1)</th>
+                          <th className="py-3.5 px-4">Filleul (Bénéficiaire 2)</th>
+                          <th className="py-3.5 px-4 text-center">Statut Parrainage</th>
+                          <th className="py-3.5 px-4 text-center">Récompense +2 Mois (60j)</th>
+                          <th className="py-3.5 px-4 text-right">Action Super Admin</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-sm">
+                        {filteredReferrals.map((r) => {
+                          const isRewarded = r.reward_given === true || r.status === 'paid';
+                          const createdDate = r.created_at ? new Date(r.created_at).toLocaleDateString('fr-FR') : '-';
+                          const rewardDate = r.reward_date ? new Date(r.reward_date).toLocaleDateString('fr-FR') : null;
+
+                          return (
+                            <tr key={r.id} className="hover:bg-slate-50/80 transition">
+                              {/* 1. Date */}
+                              <td className="py-4 px-4 whitespace-nowrap text-xs">
+                                <span className="font-mono font-bold text-slate-700 block">{createdDate}</span>
+                                <span className="text-[10px] text-slate-400 font-mono">{r.id.substring(0, 14)}</span>
+                              </td>
+
+                              {/* 2. Parrain */}
+                              <td className="py-4 px-4 whitespace-nowrap">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-700 flex items-center justify-center font-black text-xs">
+                                    👑
+                                  </div>
+                                  <div>
+                                    <span className="font-black text-slate-900 block text-sm">
+                                      {r.parrain_nom || 'Parrain EFA'}
+                                    </span>
+                                    <span className="font-mono text-xs font-black text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                      {r.parrain_code || 'CODE INCONNU'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </td>
+
+                              {/* 3. Filleul */}
+                              <td className="py-4 px-4 whitespace-nowrap">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center font-black text-xs">
+                                    🏪
+                                  </div>
+                                  <div>
+                                    <span className="font-black text-slate-900 block text-sm">
+                                      {r.filleul_nom || 'Nouvelle Boutique'}
+                                    </span>
+                                    <span className="text-xs text-slate-500 font-bold">
+                                      Plan: {r.filleul_plan || 'essai'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </td>
+
+                              {/* 4. Statut Parrainage */}
+                              <td className="py-4 px-4 text-center whitespace-nowrap">
+                                {r.status === 'paid' ? (
+                                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-black uppercase">
+                                    <Check className="w-3.5 h-3.5 stroke-[3] text-emerald-600" />
+                                    <span>Payé 1 AN ✅</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-black uppercase">
+                                    <Clock className="w-3.5 h-3.5 text-amber-700" />
+                                    <span>En attente (Essai)</span>
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* 5. Récompense +2 Mois */}
+                              <td className="py-4 px-4 text-center whitespace-nowrap">
+                                {isRewarded ? (
+                                  <div>
+                                    <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-indigo-100 text-indigo-800 text-xs font-black uppercase">
+                                      <Gift className="w-3.5 h-3.5 text-indigo-600" />
+                                      <span>+2 MOIS ACCORDÉS 🎁</span>
+                                    </span>
+                                    {rewardDate && (
+                                      <span className="block text-[10px] text-slate-400 font-bold mt-0.5">
+                                        Le {rewardDate}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-500 text-xs font-bold">
+                                    ⏳ En attente de paiement 1 an
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* 6. Action */}
+                              <td className="py-4 px-4 text-right whitespace-nowrap">
+                                {!isRewarded ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleValidateReferralBonus(r)}
+                                    className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-xs transition cursor-pointer shadow-sm flex items-center gap-1.5 ml-auto"
+                                  >
+                                    <Gift className="w-3.5 h-3.5" />
+                                    <span>Valider +2 Mois</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-xs font-black text-emerald-600">
+                                    Bonus appliqué ✅
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
       </main>
 
       {/* MODAL PROLONGATION */}

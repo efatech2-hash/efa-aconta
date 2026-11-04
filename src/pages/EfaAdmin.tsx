@@ -29,6 +29,13 @@ export async function prolongerAbonnement(patronId: string, daysToAdd: number = 
     is_active: true,
   } as any).eq('id', patronId);
 
+  await supabase.from('boutiques').update({
+    fin_abonnement: nouvelleDateIso,
+    subscription_end: nouvelleDateIso,
+    status: 'actif',
+    is_active: true,
+  } as any).eq('id', patronId);
+
   return { nouvelle_date: nouvelleDate, nouvelle_date_iso: nouvelleDateIso };
 }
 
@@ -54,6 +61,14 @@ export async function activerPro1An(patronId: string) {
     plan: 'pro_annuel',
     date_fin_essai: fin,
     is_active: true,
+    last_payment_amount: 90000,
+  } as any).eq('id', patronId);
+
+  await supabase.from('boutiques').update({
+    plan: 'pro_annuel',
+    subscription_end: fin,
+    is_active: true,
+    status: 'actif',
     last_payment_amount: 90000,
   } as any).eq('id', patronId);
 
@@ -93,6 +108,14 @@ export async function activer6Mois(patronId: string) {
     last_payment_amount: 50000,
   } as any).eq('id', patronId);
 
+  await supabase.from('boutiques').update({
+    plan: 'pro_6mois',
+    subscription_end: fin,
+    is_active: true,
+    status: 'actif',
+    last_payment_amount: 50000,
+  } as any).eq('id', patronId);
+
   return { plan: 'pro_6mois', fin };
 }
 
@@ -116,6 +139,14 @@ export async function activerPopulaire1An(patronId: string) {
     plan: 'populaire',
     date_fin_essai: fin,
     is_active: true,
+    last_payment_amount: 16500,
+  } as any).eq('id', patronId);
+
+  await supabase.from('boutiques').update({
+    plan: 'populaire',
+    subscription_end: fin,
+    is_active: true,
+    status: 'actif',
     last_payment_amount: 16500,
   } as any).eq('id', patronId);
 

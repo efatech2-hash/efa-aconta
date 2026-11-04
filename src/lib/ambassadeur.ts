@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
-import { db } from './db';
-import type { Patron, ReferralLogRecord } from './types';
+import type { ReferralLogRecord } from './types';
 
 /**
  * Génère un code de parrainage unique, propre et mémorisable
@@ -16,7 +15,7 @@ export function generateReferralCode(): string {
 }
 
 /**
- * Plans annuels strictement éligibles au bonus Ambassadeur +60 jours
+ * Plans annuels strictement éligibles au bonus Ambassadeur +2 MOIS (+60 jours)
  */
 export const ELIGIBLE_ANNUAL_PLANS = [
   'populaire_annuel',
@@ -33,7 +32,7 @@ export function isAnnualPlan(plan?: string | null, amount?: number | null, durat
   const p = plan.toLowerCase().trim();
   if (ELIGIBLE_ANNUAL_PLANS.includes(p)) return true;
   if ((p === 'populaire' || p === 'pro') && durationDays && durationDays >= 365) return true;
-  if (amount && (amount === 16500 || amount === 90000 || amount >= 16500 && (p.includes('annuel') || durationDays && durationDays >= 360))) {
+  if (amount && (amount === 16500 || amount === 90000 || (amount >= 16500 && (p.includes('annuel') || (durationDays && durationDays >= 360))))) {
     return true;
   }
   return false;
@@ -47,11 +46,28 @@ export interface ReferralBonusResult {
   bonusDays?: number;
 }
 
+export interface CentralReferralRow {
+  id: string;
+  parrain_id: string;
+  filleul_id: string;
+  status: 'pending' | 'paid';
+  reward_given: boolean;
+  parrain_code?: string;
+  filleul_code?: string;
+  parrain_nom?: string;
+  filleul_nom?: string;
+  filleul_plan?: string;
+  reward_date?: string | null;
+  created_at: string;
+}
+
 /**
  * FONCTION CRITIQUE checkAndGiveReferralBonus(filleul)
  * RÈGLE D'OR = 1 AN SEULEMENT :
- * Le bonus ambassadeur +60 jours n'est donné QUE SI ET SEULEMENT SI le filleul paye un FORFAIT ANNUEL.
- * Appelée UNIQUEMENT depuis Super Admin lors de l'activation d'un abonnement 1 an.
+ * Le bonus ambassadeur +2 mois (+60 jours) n'est accordé QUE SI ET SEULEMENT SI le filleul paye un FORFAIT ANNUEL.
+ * Met à jour Supabase table "referrals" -> status='paid', reward_given=true.
+ * Prolonge subscription_end_date de +2 mois pour le PARRAIN et le FILLEUL.
+ * 100% Supabase (Zéro localStorage).
  */
 export async function checkAndGiveReferralBonus(filleul: {
   id: string;
@@ -72,89 +88,114 @@ export async function checkAndGiveReferralBonus(filleul: {
       return { success: false, reason: 'Bonus déjà donné pour ce filleul' };
     }
 
-    // Récupérer les données à jour du filleul si referred_by n'est pas fourni
+    // Récupérer les données à jour du filleul depuis Supabase
     let referredBy: string | null | undefined = filleul.referred_by;
     let currentFilleulBonusGiven: boolean | undefined = filleul.referral_bonus_given;
+    let filleulPlan = filleul.plan || filleul.forfait || '';
+    let paymentAmount = filleul.last_payment_amount || filleul.prix || 0;
 
-    if (!referredBy || currentFilleulBonusGiven === undefined) {
+    try {
+      const { data: dbBoutique } = await supabase
+        .from('boutiques')
+        .select('referred_by, referred_by_code, referral_bonus_given, plan, last_payment_amount, subscription_end, subscription_end_date')
+        .eq('id', filleul.id)
+        .maybeSingle();
+
+      if (dbBoutique) {
+        if (!referredBy) referredBy = dbBoutique.referred_by_code || dbBoutique.referred_by;
+        if (dbBoutique.referral_bonus_given) currentFilleulBonusGiven = true;
+        if (!filleulPlan) filleulPlan = dbBoutique.plan;
+        if (!paymentAmount) paymentAmount = Number(dbBoutique.last_payment_amount) || 0;
+      }
+    } catch (e) {
+      console.warn('[Ambassadeur] Erreur lecture boutique Supabase:', e);
+    }
+
+    if (!referredBy) {
       try {
-        const { data: dbFilleul } = await supabase
+        const { data: dbPatron } = await supabase
           .from('patrons')
-          .select('referred_by, referral_bonus_given, plan, forfait')
+          .select('referred_by, referral_bonus_given, plan, forfait, last_payment_amount')
           .eq('id', filleul.id)
           .maybeSingle();
 
-        if (dbFilleul) {
-          if (!referredBy) referredBy = dbFilleul.referred_by;
-          if (dbFilleul.referral_bonus_given) currentFilleulBonusGiven = true;
+        if (dbPatron) {
+          if (!referredBy) referredBy = dbPatron.referred_by;
+          if (dbPatron.referral_bonus_given) currentFilleulBonusGiven = true;
+          if (!filleulPlan) filleulPlan = dbPatron.plan || dbPatron.forfait;
         }
-      } catch (e) {
-        console.warn('[Ambassadeur] Erreur lecture filleul remote:', e);
-      }
-
-      if (!referredBy) {
-        try {
-          const localF = await db.patrons.get(filleul.id);
-          if (localF) {
-            if (!referredBy) referredBy = localF.referred_by;
-            if (localF.referral_bonus_given) currentFilleulBonusGiven = true;
-          }
-        } catch (e) {}
-      }
+      } catch (e) {}
     }
 
     if (currentFilleulBonusGiven === true) {
-      return { success: false, reason: 'Bonus déjà donné' };
+      return { success: false, reason: 'Bonus déjà accordé' };
     }
 
     // 2. Vérifier si le filleul a un parrain
     if (!referredBy || !referredBy.trim()) {
-      return { success: false, reason: 'Ce filleul n’a pas de parrain (pas de code utilisé)' };
+      return { success: false, reason: 'Ce filleul n’a pas de parrain (aucun code utilisé)' };
     }
 
     const cleanReferredBy = referredBy.trim().toUpperCase();
 
-    // 3. CONDITION OR : Vérifier si plan est ANNUEL
-    const activePlan = filleul.plan || filleul.forfait || '';
-    const paymentAmount = filleul.last_payment_amount || filleul.prix || 0;
-    const isAnnual = isAnnualPlan(activePlan, paymentAmount, filleul.duration_days);
-
+    // 3. CONDITION OR : Vérifier si le plan est ANNUEL (1 AN)
+    const isAnnual = isAnnualPlan(filleulPlan, paymentAmount, filleul.duration_days);
     if (!isAnnual) {
       return {
         success: false,
-        reason: `Plan ${activePlan} non éligible - Seul le paiement de 1 AN donne droit au bonus +60j`,
+        reason: `Plan ${filleulPlan} non éligible - Seul le paiement de 1 AN donne droit au bonus +2 mois`,
       };
     }
 
-    // 4. Vérifier si le parrain existe
-    let parrain: any = null;
-
+    // 4. Tentative d'exécution via RPC Supabase
     try {
-      const { data } = await supabase
-        .from('patrons')
+      const { data: rpcData, error: rpcErr } = await (supabase.rpc as any)('reward_referral_bonus', {
+        target_filleul_id: filleul.id,
+      });
+
+      if (!rpcErr && rpcData?.success) {
+        console.log('[Ambassadeur] RPC reward_referral_bonus exécuté avec succès:', rpcData);
+        return {
+          success: true,
+          bonusDays: 60,
+          parrainCode: cleanReferredBy,
+        };
+      }
+    } catch (rpcEx) {
+      console.warn('[Ambassadeur] Note RPC Supabase (fallback vers requêtes directes):', rpcEx);
+    }
+
+    // 5. Recherche du parrain dans Supabase (boutiques, profiles, patrons)
+    let parrain: any = null;
+    try {
+      const { data: btqParrain } = await supabase
+        .from('boutiques')
         .select('*')
         .eq('referral_code', cleanReferredBy)
         .maybeSingle();
-      if (data) parrain = data;
-    } catch (e) {
-      console.warn('[Ambassadeur] Erreur recherche parrain remote:', e);
-    }
+      if (btqParrain) parrain = btqParrain;
+    } catch (e) {}
 
     if (!parrain) {
       try {
-        const { data: btq } = await supabase
-          .from('efa_boutiques')
+        const { data: patronParrain } = await supabase
+          .from('patrons')
           .select('*')
           .eq('referral_code', cleanReferredBy)
           .maybeSingle();
-        if (btq) parrain = btq;
+        if (patronParrain) parrain = patronParrain;
       } catch (e) {}
     }
 
     if (!parrain) {
-      // Vérifier dans Dexie local
-      const localPatrons = await db.patrons.toArray();
-      parrain = localPatrons.find((p) => p.referral_code?.toUpperCase() === cleanReferredBy);
+      try {
+        const { data: profileParrain } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('referral_code', cleanReferredBy)
+          .maybeSingle();
+        if (profileParrain) parrain = profileParrain;
+      } catch (e) {}
     }
 
     if (!parrain) {
@@ -166,139 +207,157 @@ export async function checkAndGiveReferralBonus(filleul: {
       return { success: false, reason: 'Auto-parrainage interdit' };
     }
 
-    // 5. DONNER BONUS +60 JOURS AU PARRAIN
-    const parrainRawEnd =
-      parrain.subscription_end ||
-      parrain.subscription_end_date ||
-      parrain.fin_abonnement ||
-      parrain.abonnement_expire ||
-      parrain.date_fin_essai;
-
+    // 6. CALCUL EXTENSION +2 MOIS (60 jours) POUR LE PARRAIN
     const now = new Date();
-    let baseDate = now;
+    const parrainRawEnd = parrain.subscription_end_date || parrain.subscription_end || parrain.fin_abonnement;
+    let parrainBaseDate = now;
     if (parrainRawEnd) {
       const d = new Date(parrainRawEnd);
       if (!isNaN(d.getTime()) && d > now) {
-        baseDate = d;
+        parrainBaseDate = d;
       }
     }
+    const parrainNewEnd = new Date(parrainBaseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
+    const parrainNewEndIso = parrainNewEnd.toISOString();
+    const newReferralsCount = (Number(parrain.referrals_count) || 0) + 1;
+    const newBonusDays = (Number(parrain.bonus_days_earned) || 0) + 60;
 
-    const newEnd = new Date(baseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
-    const newEndIso = newEnd.toISOString();
-    const newReferralsCount = (parrain.referrals_count || 0) + 1;
-    const newBonusDays = (parrain.bonus_days_earned || 0) + 60;
+    // 7. CALCUL EXTENSION +2 MOIS (60 jours) POUR LE FILLEUL
+    let filleulBaseDate = now;
+    try {
+      const { data: fRow } = await supabase
+        .from('boutiques')
+        .select('subscription_end, subscription_end_date')
+        .eq('id', filleul.id)
+        .maybeSingle();
+      const fEnd = fRow?.subscription_end_date || fRow?.subscription_end;
+      if (fEnd) {
+        const df = new Date(fEnd);
+        if (!isNaN(df.getTime()) && df > now) filleulBaseDate = df;
+      }
+    } catch {}
+    const filleulNewEnd = new Date(filleulBaseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
+    const filleulNewEndIso = filleulNewEnd.toISOString();
 
-    // Mise à jour Cloud Supabase du Parrain
+    // 8. METTRE À JOUR SUPABASE (Table centrale referrals)
+    try {
+      // Vérifier si une entrée referral existe déjà pour ce filleul
+      const { data: existingRef } = await supabase
+        .from('referrals')
+        .select('id')
+        .eq('filleul_id', filleul.id)
+        .maybeSingle();
+
+      if (existingRef) {
+        await supabase
+          .from('referrals')
+          .update({
+            status: 'paid',
+            reward_given: true,
+            reward_date: now.toISOString(),
+            filleul_plan: filleulPlan,
+          })
+          .eq('id', existingRef.id);
+      } else {
+        await supabase.from('referrals').insert({
+          id: 'ref_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
+          parrain_id: parrain.id,
+          filleul_id: filleul.id,
+          status: 'paid',
+          reward_given: true,
+          parrain_code: cleanReferredBy,
+          filleul_code: (filleul as any).referral_code,
+          parrain_nom: parrain.proprietaire || parrain.nom_boutique || parrain.nom || 'Parrain',
+          filleul_nom: filleul.nom_boutique || filleul.nom_personne || filleul.nom || 'Filleul',
+          filleul_plan: filleulPlan,
+          reward_date: now.toISOString(),
+          created_at: now.toISOString(),
+        });
+      }
+    } catch (refErr) {
+      console.warn('[Ambassadeur] Update referrals table:', refErr);
+    }
+
+    // 9. METTRE À JOUR PARRAIN DANS BOUTIQUES, PROFILES, PATRONS
+    try {
+      await supabase
+        .from('boutiques')
+        .update({
+          subscription_end: parrainNewEndIso,
+          subscription_end_date: parrainNewEndIso,
+          fin_abonnement: parrainNewEndIso,
+          referrals_count: newReferralsCount,
+          bonus_days_earned: newBonusDays,
+          is_active: true,
+          status: 'actif',
+        } as any)
+        .eq('id', parrain.id);
+    } catch (e) {}
+
+    try {
+      await supabase
+        .from('profiles')
+        .update({
+          subscription_end_date: parrainNewEndIso,
+        })
+        .eq('id', parrain.id);
+    } catch (e) {}
+
     try {
       await supabase
         .from('patrons')
         .update({
-          subscription_end: newEndIso,
-          subscription_end_date: newEndIso,
-          fin_abonnement: newEndIso,
-          abonnement_expire: newEndIso,
+          subscription_end: parrainNewEndIso,
+          subscription_end_date: parrainNewEndIso,
+          fin_abonnement: parrainNewEndIso,
+          abonnement_expire: parrainNewEndIso,
           referrals_count: newReferralsCount,
           bonus_days_earned: newBonusDays,
           is_active: true,
           statut: 'ACTIF',
         } as any)
         .eq('id', parrain.id);
-    } catch (e) {
-      console.warn('[Ambassadeur] Update patron remote:', e);
-    }
+    } catch (e) {}
+
+    // 10. METTRE À JOUR FILLEUL DANS BOUTIQUES, PROFILES, PATRONS
+    try {
+      await supabase
+        .from('boutiques')
+        .update({
+          subscription_end: filleulNewEndIso,
+          subscription_end_date: filleulNewEndIso,
+          referral_bonus_given: true,
+          has_paid_annuel: true,
+          is_active: true,
+          status: 'actif',
+        } as any)
+        .eq('id', filleul.id);
+    } catch (e) {}
 
     try {
       await supabase
-        .from('efa_boutiques')
+        .from('profiles')
         .update({
-          date_fin_essai: newEndIso,
-          is_active: true,
-          referrals_count: newReferralsCount,
-          bonus_days_earned: newBonusDays,
-        } as any)
-        .eq('id', parrain.id);
+          subscription_end_date: filleulNewEndIso,
+        })
+        .eq('id', filleul.id);
     } catch (e) {}
 
-    // Mise à jour Dexie local du Parrain
-    try {
-      const localP = await db.patrons.get(parrain.id);
-      if (localP) {
-        await db.patrons.update(parrain.id, {
-          subscription_end_date: newEndIso,
-          abonnement_expire: newEndIso,
-          fin_abonnement: newEndIso,
-          referrals_count: newReferralsCount,
-          bonus_days_earned: newBonusDays,
-        });
-      }
-    } catch (e) {}
-
-    // 6. Marquer le filleul comme ayant donné son bonus (1 seule fois à vie)
     try {
       await supabase
         .from('patrons')
         .update({
+          subscription_end: filleulNewEndIso,
+          subscription_end_date: filleulNewEndIso,
           referral_bonus_given: true,
           has_paid_annuel: true,
+          is_active: true,
+          statut: 'ACTIF',
         } as any)
         .eq('id', filleul.id);
     } catch (e) {}
 
-    try {
-      await supabase
-        .from('efa_boutiques')
-        .update({
-          referral_bonus_given: true,
-          has_paid_annuel: true,
-        } as any)
-        .eq('id', filleul.id);
-    } catch (e) {}
-
-    try {
-      const localF = await db.patrons.get(filleul.id);
-      if (localF) {
-        await db.patrons.update(filleul.id, {
-          referral_bonus_given: true,
-          has_paid_annuel: true,
-        });
-      }
-    } catch (e) {}
-
-    // 7. Enregistrer dans referrals_log Supabase
-    const logId = 'ref_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
-    try {
-      await supabase.from('referrals_log').insert({
-        id: logId,
-        parrain_id: parrain.id,
-        filleul_id: filleul.id,
-        filleul_plan: activePlan,
-        bonus_days: 60,
-        is_annual: true,
-        created_at: new Date().toISOString(),
-      });
-    } catch (e) {
-      console.warn('[Ambassadeur] Insertion referrals_log (remote):', e);
-    }
-
-    // Sauvegarde miroir local pour affichage immédiat et offline
-    try {
-      const stored = localStorage.getItem('efa_referrals_log');
-      const list = stored ? JSON.parse(stored) : [];
-      list.push({
-        id: logId,
-        parrain_id: parrain.id,
-        parrain_nom: parrain.nom_boutique || parrain.nom_affichage || parrain.nom || 'Parrain',
-        filleul_id: filleul.id,
-        filleul_nom: filleul.nom_boutique || filleul.nom_personne || filleul.nom || 'Filleul',
-        filleul_plan: activePlan,
-        bonus_days: 60,
-        is_annual: true,
-        created_at: new Date().toISOString(),
-      });
-      localStorage.setItem('efa_referrals_log', JSON.stringify(list));
-    } catch (e) {}
-
-    const parrainNom = parrain.nom_affichage || parrain.nom_boutique || parrain.nom || 'Parrain';
+    const parrainNom = parrain.proprietaire || parrain.nom_boutique || parrain.nom || 'Parrain';
     return {
       success: true,
       parrainNom,
@@ -312,38 +371,50 @@ export async function checkAndGiveReferralBonus(filleul: {
 }
 
 /**
- * Récupère le nombre total de parrainages annuels validés (+60j donnés)
+ * Récupère le nombre total de parrainages validés (payés 1 an, bonus accordé)
+ * 100% Supabase
  */
 export async function getTotalAnnualReferralsCount(): Promise<number> {
   try {
     const { count, error } = await supabase
-      .from('referrals_log')
-      .select('*', { count: 'exact', head: true });
+      .from('referrals')
+      .select('*', { count: 'exact', head: true })
+      .or('status.eq.paid,reward_given.eq.true');
 
     if (!error && typeof count === 'number') {
       return count;
     }
   } catch (e) {}
 
-  // Fallback 1 : compter les patrons avec has_paid_annuel
   try {
     const { count } = await supabase
-      .from('patrons')
+      .from('boutiques')
       .select('*', { count: 'exact', head: true })
       .eq('has_paid_annuel', true);
     if (typeof count === 'number' && count > 0) return count;
   } catch (e) {}
 
-  // Fallback 2 : localStorage
-  try {
-    const stored = localStorage.getItem('efa_referrals_log');
-    if (stored) {
-      const list = JSON.parse(stored);
-      if (Array.isArray(list)) return list.length;
-    }
-  } catch (e) {}
-
   return 0;
+}
+
+/**
+ * Récupère tous les enregistrements de parrainage pour le Super Admin
+ * 100% Supabase
+ */
+export async function getReferralsListCentral(): Promise<CentralReferralRow[]> {
+  try {
+    const { data, error } = await supabase
+      .from('referrals')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!error && Array.isArray(data)) {
+      return data as CentralReferralRow[];
+    }
+  } catch (e) {
+    console.warn('[Ambassadeur] Erreur lecture referrals:', e);
+  }
+  return [];
 }
 
 export interface FilleulInfo {
@@ -358,7 +429,8 @@ export interface FilleulInfo {
 }
 
 /**
- * Récupère la liste des filleuls d'un parrain donné (par son referral_code)
+ * Récupère la liste des filleuls d'un parrain donné depuis Supabase
+ * 100% Supabase (Zéro localStorage)
  */
 export async function getFilleulsForParrain(referralCode?: string | null): Promise<FilleulInfo[]> {
   if (!referralCode) return [];
@@ -367,57 +439,61 @@ export async function getFilleulsForParrain(referralCode?: string | null): Promi
   const results: FilleulInfo[] = [];
   const visitedIds = new Set<string>();
 
-  // 1. Chercher dans patrons Supabase
+  // 1. Chercher dans la table centrale "referrals"
   try {
-    const { data } = await supabase
-      .from('patrons')
-      .select('id, nom, nom_boutique, telephone, created_at, plan, forfait, referral_bonus_given, has_paid_annuel, last_payment_amount, prix')
-      .eq('referred_by', code);
+    const { data: refData } = await supabase
+      .from('referrals')
+      .select('*')
+      .or(`parrain_code.eq.${code},parrain_id.eq.${code}`);
 
-    if (data && Array.isArray(data)) {
-      for (const p of data) {
-        visitedIds.add(p.id);
-        results.push(classifyFilleul(p));
+    if (refData && Array.isArray(refData)) {
+      for (const r of refData) {
+        visitedIds.add(r.filleul_id);
+        const isBonus = r.status === 'paid' || r.reward_given === true;
+        results.push({
+          id: r.filleul_id,
+          nom: r.filleul_nom || 'Commerçante',
+          nom_boutique: r.filleul_nom || 'Boutique',
+          telephone: '',
+          created_at: r.created_at,
+          plan: r.filleul_plan || 'essai',
+          statutText: isBonus ? 'Payé 1 AN (Bonus +60j donné ✅)' : 'Essai',
+          isBonusAwarded: isBonus,
+        });
       }
     }
   } catch (e) {}
 
-  // 2. Chercher dans efa_boutiques
+  // 2. Chercher dans la table centrale "boutiques"
   try {
     const { data: btqs } = await supabase
-      .from('efa_boutiques')
+      .from('boutiques')
       .select('*')
-      .eq('referred_by', code);
+      .or(`referred_by_code.eq.${code},referred_by.eq.${code}`);
 
     if (btqs && Array.isArray(btqs)) {
       for (const b of btqs) {
         if (!visitedIds.has(b.id)) {
           visitedIds.add(b.id);
-          results.push(
-            classifyFilleul({
-              id: b.id,
-              nom: b.nom_patron || b.nom_affichage,
-              nom_boutique: b.nom_affichage || b.nom_boutique,
-              telephone: '',
-              created_at: b.created_at,
-              plan: b.plan,
-              referral_bonus_given: (b as any).referral_bonus_given,
-              has_paid_annuel: (b as any).has_paid_annuel,
-              last_payment_amount: b.last_payment_amount,
-            })
-          );
+          results.push(classifyFilleul(b));
         }
       }
     }
   } catch (e) {}
 
-  // 3. Chercher dans Dexie local
+  // 3. Compléter avec "patrons"
   try {
-    const local = await db.patrons.toArray();
-    for (const lp of local) {
-      if (lp.referred_by?.toUpperCase() === code && !visitedIds.has(lp.id)) {
-        visitedIds.add(lp.id);
-        results.push(classifyFilleul(lp));
+    const { data: patrons } = await supabase
+      .from('patrons')
+      .select('*')
+      .eq('referred_by', code);
+
+    if (patrons && Array.isArray(patrons)) {
+      for (const p of patrons) {
+        if (!visitedIds.has(p.id)) {
+          visitedIds.add(p.id);
+          results.push(classifyFilleul(p));
+        }
       }
     }
   } catch (e) {}
@@ -427,7 +503,7 @@ export async function getFilleulsForParrain(referralCode?: string | null): Promi
 
 function classifyFilleul(p: any): FilleulInfo {
   const plan = (p.plan || p.forfait || 'essai').toLowerCase();
-  const amount = p.last_payment_amount || p.prix || 0;
+  const amount = Number(p.last_payment_amount) || Number(p.prix) || 0;
   const bonusGiven = p.referral_bonus_given === true || p.has_paid_annuel === true;
 
   let statutText: FilleulInfo['statutText'] = 'Essai';
@@ -444,7 +520,7 @@ function classifyFilleul(p: any): FilleulInfo {
 
   return {
     id: p.id,
-    nom: p.nom || 'Commerçante',
+    nom: p.proprietaire || p.nom || 'Commerçante',
     nom_boutique: p.nom_boutique || p.nom_affichage || 'Boutique',
     telephone: p.telephone || p.phone_full || '',
     created_at: p.created_at,

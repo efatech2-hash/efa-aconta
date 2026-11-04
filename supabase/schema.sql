@@ -152,15 +152,23 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 11. Table Boutiques Distinctes
+-- 11. Table Boutiques Centrale (Synchronisation multi-appareils & Super Admin)
 CREATE TABLE IF NOT EXISTS public.boutiques (
-    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    patron_id TEXT REFERENCES public.patrons(id) ON DELETE CASCADE,
-    nom TEXT NOT NULL,
-    adresse TEXT,
-    current_plan TEXT DEFAULT 'free',
+    id TEXT PRIMARY KEY,
+    nom_boutique TEXT NOT NULL,
+    proprietaire TEXT,
+    email TEXT,
+    telephone TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    user_id TEXT,
+    status TEXT DEFAULT 'actif',
+    nom TEXT,
+    patron_id TEXT,
+    pin_code TEXT,
+    plan TEXT DEFAULT 'essai',
+    subscription_end TIMESTAMPTZ,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    last_payment_amount NUMERIC DEFAULT 0
 );
 
 -- 12. Table efa_boutiques (Zero Email / Zero Gmail)
@@ -327,3 +335,47 @@ CREATE POLICY "Owner can delete own product images" ON storage.objects
         bucket_id = 'efa-aconta-produits' AND
         ((storage.foldername(name))[1] = auth.uid()::text OR auth.role() = 'service_role')
     );
+
+-- 17. Table profiles (avec referral_code, referred_by_code, subscription_end_date)
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    nom TEXT,
+    nom_boutique TEXT,
+    telephone TEXT,
+    referral_code TEXT UNIQUE,
+    referred_by_code TEXT,
+    subscription_end_date TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 18. Table referrals (Centralisée pour parrainage et récompenses)
+CREATE TABLE IF NOT EXISTS public.referrals (
+    id TEXT PRIMARY KEY,
+    parrain_id TEXT NOT NULL,
+    filleul_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'paid'
+    reward_given BOOLEAN NOT NULL DEFAULT FALSE,
+    parrain_code TEXT,
+    filleul_code TEXT,
+    parrain_nom TEXT,
+    filleul_nom TEXT,
+    filleul_plan TEXT,
+    reward_date TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.referrals ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow anon and auth all profiles" ON public.profiles
+    FOR ALL TO anon, authenticated
+    USING (true)
+    WITH CHECK (true);
+
+CREATE POLICY "Allow anon and auth all referrals" ON public.referrals
+    FOR ALL TO anon, authenticated
+    USING (true)
+    WITH CHECK (true);
+

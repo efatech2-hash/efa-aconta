@@ -175,14 +175,20 @@ export default function App() {
       const searchParams = new URLSearchParams(window.location.search);
       const urlRef = searchParams.get('ref');
       if (urlRef) {
-        localStorage.setItem('efa_aconta_ref', urlRef.trim().toUpperCase());
+        const clean = urlRef.trim().toUpperCase();
+        (window as any).__efa_ref_code = clean;
+        localStorage.setItem('efa_aconta_ref', clean);
       }
       if (window.location.hash.includes('ref=')) {
         const hashIdx = window.location.hash.indexOf('?');
         if (hashIdx !== -1) {
           const hashParams = new URLSearchParams(window.location.hash.substring(hashIdx));
           const hashRef = hashParams.get('ref');
-          if (hashRef) localStorage.setItem('efa_aconta_ref', hashRef.trim().toUpperCase());
+          if (hashRef) {
+            const clean = hashRef.trim().toUpperCase();
+            (window as any).__efa_ref_code = clean;
+            localStorage.setItem('efa_aconta_ref', clean);
+          }
         }
       }
 

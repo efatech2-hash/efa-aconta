@@ -148,10 +148,14 @@ export async function createBoutique({
   nomBoutique,
   nomPatron,
   pin,
+  telephone,
+  email,
 }: {
   nomBoutique: string;
   nomPatron: string;
   pin: string;
+  telephone?: string;
+  email?: string;
 }): Promise<{ success: boolean; boutique?: EfaBoutiqueRecord; error?: string }> {
   try {
     const slug = slugifyBoutiqueName(nomBoutique);
@@ -160,8 +164,29 @@ export async function createBoutique({
     const trialEnd = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // 21 jours
     const boutiqueId = 'btq_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
 
-    // Capture du parrain depuis le lien d'invitation (?ref=CODE)
-    const refBy = typeof window !== 'undefined' ? (localStorage.getItem('efa_aconta_ref') || null) : null;
+    // Capture du parrain depuis l'URL (?ref=CODE) ou hash
+    let refBy: string | null = null;
+    if (typeof window !== 'undefined') {
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const qRef = urlParams.get('ref');
+        if (qRef) refBy = qRef;
+        if (!refBy && window.location.hash.includes('ref=')) {
+          const hashIdx = window.location.hash.indexOf('?');
+          if (hashIdx !== -1) {
+            const hashParams = new URLSearchParams(window.location.hash.substring(hashIdx));
+            refBy = hashParams.get('ref');
+          }
+        }
+        if (!refBy && (window as any).__efa_ref_code) {
+          refBy = (window as any).__efa_ref_code;
+        }
+        if (!refBy) {
+          refBy = localStorage.getItem('efa_aconta_ref');
+        }
+      } catch (e) {}
+    }
+    const cleanReferredBy = refBy ? refBy.trim().toUpperCase() : null;
     const referralCode = generateReferralCode();
 
     const boutiqueRecord: EfaBoutiqueRecord = {
@@ -174,7 +199,7 @@ export async function createBoutique({
       plan: 'essai',
       date_fin_essai: trialEnd.toISOString(),
       referral_code: referralCode,
-      referred_by: refBy ? refBy.trim().toUpperCase() : null,
+      referred_by: cleanReferredBy,
       referral_bonus_given: false,
       has_paid_annuel: false,
       referrals_count: 0,
@@ -182,47 +207,137 @@ export async function createBoutique({
       created_at: now.toISOString(),
     };
 
-    // 1. Sauvegarde dans Dexie (Local)
-    const patronObj = boutiqueToPatron(boutiqueRecord, pin);
-    await db.patrons.put(patronObj);
-
-    // 2. Création de l'appareil dans efa_devices (Device #1)
-    const currentDevId = getDeviceId();
-    const currentDevName = getDeviceName();
-    const deviceRecord: EfaDeviceRecord = {
-      id: 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
-      boutique_id: boutiqueId,
-      device_id: currentDevId,
-      device_name: currentDevName,
-      last_seen: now.toISOString(),
-      is_active: true,
+    // 1. Enregistrement central direct dans Supabase table "boutiques"
+    // (id, nom_boutique, proprietaire, email, telephone, created_at, user_id, status, referral_code, referred_by_code, subscription_end_date)
+    const centralBoutiqueData = {
+      id: boutiqueId,
+      nom_boutique: nomBoutique.trim(),
+      proprietaire: nomPatron.trim() || 'Patron',
+      email: email?.trim() || '',
+      telephone: telephone?.trim() || '',
       created_at: now.toISOString(),
+      user_id: boutiqueId,
+      status: 'actif',
+      nom: nomBoutique.trim(),
+      patron_id: boutiqueId,
+      pin_code: pin,
+      plan: 'essai',
+      subscription_end: trialEnd.toISOString(),
+      subscription_end_date: trialEnd.toISOString(),
+      referral_code: referralCode,
+      referred_by_code: cleanReferredBy,
+      referred_by: cleanReferredBy,
+      is_active: true,
+      last_payment_amount: 0,
     };
 
-    // Sauvegarde appareil local Dexie
-    await db.appareils.put({
-      id: deviceRecord.id,
-      patron_id: boutiqueId,
-      device_id: currentDevId,
-      device_name: currentDevName,
-      last_active: now.toISOString(),
-      is_active: true,
-      created_at: now.toISOString(),
-    });
-
-    // 3. Synchronisation Cloud Supabase (efa_boutiques + efa_devices + patrons)
     try {
-      // Insertion efa_boutiques
-      await supabase.from('efa_boutiques').upsert(boutiqueRecord);
-      // Insertion efa_devices
-      await supabase.from('efa_devices').upsert(deviceRecord);
-      // Miroir patrons pour synchronisation continue
-      await supabase.from('patrons').upsert(patronObj);
-    } catch (cloudErr) {
-      console.warn('[DeviceAuth] Sync cloud reportée (offline first):', cloudErr);
+      const { error: insertErr } = await supabase.from('boutiques').insert(centralBoutiqueData);
+      if (insertErr) {
+        console.warn('[DeviceAuth] Insert boutiques initial, tentative upsert:', insertErr);
+        await supabase.from('boutiques').upsert(centralBoutiqueData);
+      }
+    } catch (supaErr) {
+      console.warn('[DeviceAuth] Erreur insert Supabase boutiques:', supaErr);
     }
 
-    // Sauvegarde variables session
+    // 2. Enregistrement table "profiles"
+    try {
+      await supabase.from('profiles').upsert({
+        id: boutiqueId,
+        user_id: boutiqueId,
+        nom: nomPatron.trim() || 'Patron',
+        nom_boutique: nomBoutique.trim(),
+        telephone: telephone?.trim() || '',
+        referral_code: referralCode,
+        referred_by_code: cleanReferredBy,
+        subscription_end_date: trialEnd.toISOString(),
+        created_at: now.toISOString(),
+      });
+    } catch (profileErr) {
+      console.warn('[DeviceAuth] Sync profiles:', profileErr);
+    }
+
+    // 3. Suivi parrainage : création de l'entrée dans la table centrale "referrals" avec status=pending
+    if (cleanReferredBy) {
+      try {
+        let parrainId = cleanReferredBy;
+        let parrainNom = 'Parrain EFA';
+        const { data: parrainBtq } = await supabase
+          .from('boutiques')
+          .select('id, proprietaire, nom_boutique')
+          .eq('referral_code', cleanReferredBy)
+          .maybeSingle();
+
+        if (parrainBtq) {
+          parrainId = parrainBtq.id;
+          parrainNom = parrainBtq.proprietaire || parrainBtq.nom_boutique || 'Parrain EFA';
+        } else {
+          const { data: parrainPatron } = await supabase
+            .from('patrons')
+            .select('id, nom, nom_boutique')
+            .eq('referral_code', cleanReferredBy)
+            .maybeSingle();
+          if (parrainPatron) {
+            parrainId = parrainPatron.id;
+            parrainNom = parrainPatron.nom || parrainPatron.nom_boutique || 'Parrain EFA';
+          }
+        }
+
+        const referralEntry = {
+          id: 'ref_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
+          parrain_id: parrainId,
+          filleul_id: boutiqueId,
+          status: 'pending',
+          reward_given: false,
+          parrain_code: cleanReferredBy,
+          filleul_code: referralCode,
+          parrain_nom: parrainNom,
+          filleul_nom: nomBoutique.trim(),
+          filleul_plan: 'essai',
+          created_at: now.toISOString(),
+        };
+
+        await supabase.from('referrals').insert(referralEntry);
+      } catch (refErr) {
+        console.warn('[DeviceAuth] Erreur insert referrals pending:', refErr);
+      }
+    }
+
+    // 2. Miroirs de secours efa_boutiques, efa_devices et patrons dans Supabase
+    try {
+      await supabase.from('efa_boutiques').upsert(boutiqueRecord);
+      const currentDevId = getDeviceId();
+      const currentDevName = getDeviceName();
+      const deviceRecord: EfaDeviceRecord = {
+        id: 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
+        boutique_id: boutiqueId,
+        device_id: currentDevId,
+        device_name: currentDevName,
+        last_seen: now.toISOString(),
+        is_active: true,
+        created_at: now.toISOString(),
+      };
+      await supabase.from('efa_devices').upsert(deviceRecord);
+      const patronObj = boutiqueToPatron(boutiqueRecord, pin);
+      await supabase.from('patrons').upsert(patronObj);
+
+      // Sauvegarde appareil local Dexie pour mode offline
+      await db.appareils.put({
+        id: deviceRecord.id,
+        patron_id: boutiqueId,
+        device_id: currentDevId,
+        device_name: currentDevName,
+        last_active: now.toISOString(),
+        is_active: true,
+        created_at: now.toISOString(),
+      });
+      await db.patrons.put(patronObj);
+    } catch (cloudErr) {
+      console.warn('[DeviceAuth] Sync miroir cloud reportée:', cloudErr);
+    }
+
+    // 3. Variables session pour l'onglet courant
     localStorage.setItem('currentBoutiqueId', boutiqueId);
     localStorage.setItem('currentBoutiqueSlug', slug);
     localStorage.setItem('currentBoutiqueName', nomBoutique.trim());
@@ -263,20 +378,48 @@ export async function loginBoutique({
     const searchSlug = slugifyBoutiqueName(nomOrSlug);
     let boutique: EfaBoutiqueRecord | null = null;
 
-    // 1. Recherche dans Supabase en priorité
+    // 1. Recherche dans table centrale Supabase "boutiques" en priorité
     try {
-      const { data: remoteBtq } = await supabase
-        .from('efa_boutiques')
+      const { data: centralBtq } = await supabase
+        .from('boutiques')
         .select('*')
-        .or(`nom_boutique.eq.${searchSlug},nom_affichage.ilike.%${nomOrSlug.trim()}%`)
+        .or(`nom_boutique.ilike.%${nomOrSlug.trim()}%,nom.ilike.%${nomOrSlug.trim()}%`)
         .limit(1)
         .maybeSingle();
 
-      if (remoteBtq) {
-        boutique = remoteBtq;
+      if (centralBtq) {
+        boutique = {
+          id: centralBtq.id,
+          nom_boutique: slugifyBoutiqueName(centralBtq.nom_boutique),
+          nom_affichage: centralBtq.nom_boutique,
+          nom_patron: centralBtq.proprietaire || 'Patron',
+          pin_patron_hash: centralBtq.pin_code ? await hashPin(centralBtq.pin_code) : '',
+          pin_code: centralBtq.pin_code || '',
+          plan: centralBtq.plan || 'essai',
+          date_fin_essai: centralBtq.subscription_end || new Date(Date.now() + 21 * 86400000).toISOString(),
+          created_at: centralBtq.created_at || new Date().toISOString(),
+        };
       }
     } catch (e) {
-      console.warn('[DeviceAuth] Erreur recherche Supabase efa_boutiques:', e);
+      console.warn('[DeviceAuth] Erreur recherche Supabase boutiques:', e);
+    }
+
+    // 2. Recherche dans Supabase efa_boutiques
+    if (!boutique) {
+      try {
+        const { data: remoteBtq } = await supabase
+          .from('efa_boutiques')
+          .select('*')
+          .or(`nom_boutique.eq.${searchSlug},nom_affichage.ilike.%${nomOrSlug.trim()}%`)
+          .limit(1)
+          .maybeSingle();
+
+        if (remoteBtq) {
+          boutique = remoteBtq;
+        }
+      } catch (e) {
+        console.warn('[DeviceAuth] Erreur recherche Supabase efa_boutiques:', e);
+      }
     }
 
     // 2. Fallback recherche dans table patrons Supabase
