@@ -156,19 +156,36 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
 CREATE TABLE IF NOT EXISTS public.boutiques (
     id TEXT PRIMARY KEY,
     nom_boutique TEXT NOT NULL,
+    nom TEXT,
     proprietaire TEXT,
     email TEXT,
     telephone TEXT,
+    pin_code TEXT,
+    referral_code TEXT,
+    referred_by_code TEXT,
+    plan TEXT DEFAULT 'essai',
+    status TEXT DEFAULT 'active',
+    subscription_end_date TIMESTAMPTZ,
+    subscription_end TIMESTAMPTZ,
+    has_paid_annuel BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     user_id TEXT,
-    status TEXT DEFAULT 'actif',
-    nom TEXT,
     patron_id TEXT,
-    pin_code TEXT,
-    plan TEXT DEFAULT 'essai',
-    subscription_end TIMESTAMPTZ,
     is_active BOOLEAN DEFAULT TRUE,
     last_payment_amount NUMERIC DEFAULT 0
+);
+
+-- 11b. Table Payments (Historique des paiements & activations)
+CREATE TABLE IF NOT EXISTS public.payments (
+    id TEXT PRIMARY KEY,
+    boutique_id TEXT,
+    patron_id TEXT,
+    amount NUMERIC DEFAULT 0,
+    montant NUMERIC DEFAULT 0,
+    plan TEXT,
+    status TEXT DEFAULT 'completed',
+    payment_method TEXT DEFAULT 'admin_manual',
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 12. Table efa_boutiques (Zero Email / Zero Gmail)

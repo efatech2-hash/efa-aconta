@@ -244,7 +244,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       created_at: row.created_at || new Date().toISOString(),
       source: 'boutiques',
       referral_code: row.referral_code,
-      referred_by: row.referred_by || null,
+      referred_by: row.referred_by || row.referred_by_code || null,
       referral_bonus_given: Boolean(row.referral_bonus_given),
       has_paid_annuel: Boolean(row.has_paid_annuel),
       referrals_count: Number(row.referrals_count) || 0,
@@ -570,18 +570,67 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         });
       } catch {}
 
-      // 2. Mettre à jour Supabase direct (table boutiques centrale en priorité)
+      const isAnnuel = durationDays >= 360 || planCode.includes('annuel') || amount === 90000 || amount === 16500;
+      const paymentId = 'pay_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+      const subId = 'sub_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+      const nowIso = new Date().toISOString();
+
+      // 1. INSERT dans 'payments'
+      try {
+        await supabase.from('payments').insert({
+          id: paymentId,
+          boutique_id: boutique.id,
+          patron_id: boutique.id,
+          amount,
+          montant: amount,
+          plan: planCode,
+          status: 'completed',
+          payment_method: 'admin_manual',
+          created_at: nowIso,
+        });
+      } catch (payErr) {
+        console.warn('[SUPER ADMIN] Note insert payments:', payErr);
+      }
+
+      // 2. INSERT dans 'subscriptions'
+      try {
+        await supabase.from('subscriptions').insert({
+          id: subId,
+          boutique_id: boutique.id,
+          patron_id: boutique.id,
+          plan: planCode,
+          status: 'active',
+          expires_at: expiryDate,
+          subscription_end_date: expiryDate,
+          created_at: nowIso,
+          updated_at: nowIso,
+        });
+      } catch (subErr) {
+        console.warn('[SUPER ADMIN] Note insert subscriptions:', subErr);
+      }
+
+      // 3. UPDATE boutiques SET subscription_end_date, has_paid_annuel=true, plan, status='active' WHERE id=boutique_id
       await supabase
         .from('boutiques')
         .update({
           plan: planCode,
+          status: 'active',
+          subscription_end_date: expiryDate,
           subscription_end: expiryDate,
+          has_paid_annuel: isAnnuel ? true : Boolean(boutique.has_paid_annuel),
           is_active: true,
-          status: 'actif',
           last_payment_amount: amount,
         } as any)
         .eq('id', boutique.id);
 
+      try {
+        await supabase
+          .from('profiles')
+          .update({
+            subscription_end_date: expiryDate,
+          })
+          .eq('id', boutique.id);
+      } catch (e) {}
 
       await supabase
         .from('patrons')

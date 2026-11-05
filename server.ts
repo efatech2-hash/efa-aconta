@@ -843,15 +843,59 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
     const { boutique_id, duration_days, plan, amount } = parsed.data;
     const expiryDate = new Date(Date.now() + duration_days * 24 * 60 * 60 * 1000).toISOString();
 
+    const isAnnuel = duration_days >= 360 || plan.includes('annuel') || amount === 90000 || amount === 16500;
+    const nowIso = new Date().toISOString();
+    const paymentId = 'pay_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+    const subId = 'sub_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+
+    try {
+      await supabase.from('payments').insert({
+        id: paymentId,
+        boutique_id,
+        patron_id: boutique_id,
+        amount,
+        montant: amount,
+        plan,
+        status: 'completed',
+        payment_method: 'admin_manual',
+        created_at: nowIso,
+      });
+    } catch (e) {}
+
+    try {
+      await supabase.from('subscriptions').insert({
+        id: subId,
+        boutique_id,
+        patron_id: boutique_id,
+        plan,
+        status: 'active',
+        expires_at: expiryDate,
+        subscription_end_date: expiryDate,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+    } catch (e) {}
+
     try {
       await supabase
         .from('boutiques')
         .update({
           plan,
+          status: 'active',
+          subscription_end_date: expiryDate,
           subscription_end: expiryDate,
+          has_paid_annuel: isAnnuel,
           is_active: true,
-          status: 'actif',
           last_payment_amount: amount,
+        })
+        .eq('id', boutique_id);
+    } catch (e) {}
+
+    try {
+      await supabase
+        .from('profiles')
+        .update({
+          subscription_end_date: expiryDate,
         })
         .eq('id', boutique_id);
     } catch (e) {}

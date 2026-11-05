@@ -216,42 +216,46 @@ export async function createBoutique({
       subscription_end_date: trialEnd.toISOString(),
     });
 
-    // 1. Enregistrement central direct dans Supabase table "boutiques"
-    // (id, nom_boutique, proprietaire, email, telephone, created_at, user_id, status, referral_code, referred_by_code, subscription_end_date)
+    // 1. Enregistrement central OBLIGATOIRE direct dans Supabase table "boutiques"
+    // (id, nom_boutique, nom, email, telephone, pin_code, referral_code, referred_by_code, plan, status='active', subscription_end_date, has_paid_annuel=false, created_at=now())
     const centralBoutiqueData = {
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
-      proprietaire: nomPatron.trim() || 'Patron',
+      nom: nomPatron.trim() || nomBoutique.trim(),
       email: email?.trim() || '',
       telephone: telephone?.trim() || '',
-      created_at: now.toISOString(),
-      user_id: boutiqueId,
-      status: 'actif',
-      nom: nomBoutique.trim(),
-      patron_id: boutiqueId,
       pin_code: pin,
-      plan: 'essai',
-      subscription_end: trialEnd.toISOString(),
-      subscription_end_date: trialEnd.toISOString(),
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
+      plan: 'essai',
+      status: 'active',
+      subscription_end_date: trialEnd.toISOString(),
+      has_paid_annuel: false,
+      created_at: now.toISOString(),
+      // Champs complémentaires pour rétro-compatibilité
+      proprietaire: nomPatron.trim() || 'Patron',
+      user_id: boutiqueId,
+      patron_id: boutiqueId,
+      subscription_end: trialEnd.toISOString(),
       referred_by: cleanReferredBy,
       is_active: true,
       last_payment_amount: 0,
     };
 
-    try {
-      const { error: insertErr } = await supabase
-        .from('boutiques')
-        .upsert(centralBoutiqueData, { onConflict: 'id' });
-      if (insertErr) {
-        console.error('[DeviceAuth CREATE] ERREUR INSERT/UPSERT BOUTIQUES:', insertErr);
-      } else {
-        console.log('[DeviceAuth CREATE] SUCCÈS INSERT BOUTIQUES:', boutiqueId);
-      }
-    } catch (supaErr) {
-      console.error('[DeviceAuth CREATE] EXCEPTION BOUTIQUES:', supaErr);
+    // INSERT OBLIGATOIRE dans Supabase. Si l'insert échoue, on affiche une erreur et on NE crée PAS en local !
+    const { error: insertErr } = await supabase
+      .from('boutiques')
+      .insert(centralBoutiqueData);
+
+    if (insertErr) {
+      console.error('[DeviceAuth CREATE] ERREUR INSERT BOUTIQUES OBLIGATOIRE:', insertErr);
+      return {
+        success: false,
+        error: `Échec de l'enregistrement dans la base centrale : ${insertErr.message || 'Erreur réseau/Supabase'}. Impossible de créer le compte sans connexion à Supabase.`,
+      };
     }
+
+    console.log('[DeviceAuth CREATE] SUCCÈS INSERT OBLIGATOIRE BOUTIQUES:', boutiqueId);
 
     // 2. Enregistrement table "profiles" (même id, même referral_code, même subscription_end_date)
     try {
