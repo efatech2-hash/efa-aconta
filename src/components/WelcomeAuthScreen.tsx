@@ -19,6 +19,7 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
   // Formulaire Création
   const [createNomBoutique, setCreateNomBoutique] = useState('');
   const [createNomPatron, setCreateNomPatron] = useState('');
+  const [createWhatsapp, setCreateWhatsapp] = useState('');
   const [createPin, setCreatePin] = useState('');
   const [createConfirmPin, setCreateConfirmPin] = useState('');
   const [showCreatePin, setShowCreatePin] = useState(false);
@@ -56,6 +57,11 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
       setErrorMsg('Veuillez indiquer le nom de votre boutique.');
       return;
     }
+    const cleanDigits = createWhatsapp.replace(/\D/g, '');
+    if (!createWhatsapp.trim() || cleanDigits.length < 8) {
+      setErrorMsg('Le numéro WhatsApp est obligatoire et doit comporter au moins 8 chiffres (ex : +228 90 00 00 00).');
+      return;
+    }
     if (createPin.length !== 4) {
       setErrorMsg('Le code PIN patron doit comporter exactement 4 chiffres (comme Mobile Money).');
       return;
@@ -70,6 +76,8 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
       const res = await createBoutique({
         nomBoutique: createNomBoutique.trim(),
         nomPatron: createNomPatron.trim(),
+        whatsappNumber: createWhatsapp.trim(),
+        telephone: createWhatsapp.trim(),
         pin: createPin,
       });
 
@@ -245,6 +253,25 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
                 onChange={(e) => setCreateNomPatron(e.target.value)}
                 className="w-full p-4 rounded-2xl border-2 border-gray-200 text-base font-bold focus:border-[#6C5CE7] outline-none text-gray-900 bg-gray-50/50"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-black text-gray-700 uppercase tracking-wide mb-1 flex items-center justify-between">
+                <span>Numéro WhatsApp : *</span>
+                <span className="text-[10px] text-emerald-600 font-bold lowercase">assistance & caisse</span>
+              </label>
+              <input
+                type="tel"
+                inputMode="tel"
+                required
+                placeholder="+228..."
+                value={createWhatsapp}
+                onChange={(e) => setCreateWhatsapp(e.target.value)}
+                className="w-full p-4 rounded-2xl border-2 border-gray-200 text-base font-bold focus:border-[#6C5CE7] outline-none text-gray-900 bg-gray-50/50"
+              />
+              <p className="text-[11px] text-gray-400 mt-1 font-semibold">
+                8 chiffres minimum (ex : +228 90 00 00 00)
+              </p>
             </div>
 
             <div>

@@ -770,6 +770,7 @@ app.get('/api/admin/boutiques', requireAdminAuth, async (_req: Request, res: Res
           pin_code: b.pin_code || '----',
           quartier: b.quartier || '',
           telephone: b.telephone || '',
+          whatsapp_number: b.whatsapp_number || b.telephone || '',
           status,
           is_active: b.is_active !== false,
           subscription_end: subEnd || null,

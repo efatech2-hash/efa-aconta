@@ -30,6 +30,7 @@ export default async function handler(req: any, res: any) {
       pin_code: b.pin_code || '----',
       quartier: b.quartier || '',
       telephone: b.telephone || '',
+      whatsapp_number: b.whatsapp_number || b.telephone || '',
       status: b.status || (b.is_active === false ? 'bloque' : 'actif'),
       is_active: b.is_active !== false,
       subscription_end: b.subscription_end || b.subscription_end_date || null,

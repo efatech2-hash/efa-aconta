@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS public.boutiques (
     proprietaire TEXT,
     email TEXT,
     telephone TEXT,
+    whatsapp_number TEXT,
     pin_code TEXT,
     referral_code TEXT,
     referred_by_code TEXT,
@@ -354,13 +355,14 @@ CREATE POLICY "Owner can delete own product images" ON storage.objects
         ((storage.foldername(name))[1] = auth.uid()::text OR auth.role() = 'service_role')
     );
 
--- 17. Table profiles (avec referral_code, referred_by_code, subscription_end_date)
+-- 17. Table profiles (avec referral_code, referred_by_code, subscription_end_date, whatsapp_number)
 CREATE TABLE IF NOT EXISTS public.profiles (
     id TEXT PRIMARY KEY,
     user_id TEXT,
     nom TEXT,
     nom_boutique TEXT,
     telephone TEXT,
+    whatsapp_number TEXT,
     referral_code TEXT UNIQUE,
     referred_by_code TEXT,
     subscription_end_date TIMESTAMPTZ,

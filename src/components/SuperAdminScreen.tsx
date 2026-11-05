@@ -44,6 +44,7 @@ export interface AdminBoutique {
   pin_code: string;
   quartier?: string;
   telephone?: string;
+  whatsapp_number?: string;
   status: 'actif' | 'bloque' | 'expire' | 'en_attente' | string;
   is_active: boolean;
   subscription_end?: string | null;
@@ -217,6 +218,15 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     showToast('Déconnexion effectuée', 'info');
   };
 
+  // Helper pour formater les liens directs WhatsApp (wa.me)
+  const formatWaLink = (num?: string): string => {
+    if (!num) return '';
+    const digits = num.replace(/\D/g, '');
+    if (!digits) return '';
+    const fullNumber = digits.length === 8 ? `228${digits}` : digits;
+    return `https://wa.me/${fullNumber}`;
+  };
+
   // Helper pour formater une ligne Supabase en AdminBoutique
   const formatBoutiqueRow = (row: any): AdminBoutique => {
     const subEnd = row.subscription_end || row.date_fin_essai || row.fin_abonnement || row.subscription_end_date || null;
@@ -229,13 +239,17 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         ? 'expire'
         : (row.status === 'bloque' ? 'bloque' : (row.status || 'actif'));
 
+    const rawWhatsapp = (row.whatsapp_number || '').trim();
+    const rawPhone = (row.telephone || row.email || '').trim();
+
     return {
       id: row.id,
       nom_personne: row.proprietaire || row.nom_patron || row.nom_personne || row.nom || 'Patron',
       nom_boutique: row.nom_boutique || row.nom_affichage || row.nom || 'Ma Boutique',
       pin_code: row.pin_code || row.code_pin || '----',
       quartier: row.quartier || row.adresse || '',
-      telephone: row.telephone || row.email || '',
+      telephone: rawPhone || rawWhatsapp,
+      whatsapp_number: rawWhatsapp || rawPhone,
       status,
       is_active: row.is_active !== false,
       subscription_end: subEnd,
@@ -893,7 +907,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       const matchNom = (b.nom_personne || '').toLowerCase().includes(q);
       const matchBoutique = (b.nom_boutique || '').toLowerCase().includes(q);
       const matchQuartier = (b.quartier || '').toLowerCase().includes(q);
-      const matchPhone = (b.telephone || '').toLowerCase().includes(q);
+      const matchPhone = (b.telephone || '').toLowerCase().includes(q) || (b.whatsapp_number || '').toLowerCase().includes(q);
       const matchPin = (b.pin_code || '').includes(q);
 
       return matchNom || matchBoutique || matchQuartier || matchPhone || matchPin;
@@ -1444,6 +1458,20 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                         </div>
                       </div>
 
+                      {/* Contact WhatsApp Direct Mobile */}
+                      {(b.whatsapp_number || b.telephone) && (
+                        <a
+                          href={formatWaLink(b.whatsapp_number || b.telephone)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="w-full py-2.5 px-3 rounded-2xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 font-black text-xs flex items-center justify-center gap-2 transition shadow-xs"
+                          title="Discuter directement sur WhatsApp"
+                        >
+                          <MessageCircle className="w-4 h-4 text-emerald-600 fill-emerald-600/20 shrink-0" />
+                          <span>WhatsApp : {b.whatsapp_number || b.telephone} (Discuter direct)</span>
+                        </a>
+                      )}
+
                       {/* 4 BOUTONS D'ACTION SUR MOBILE */}
                       <div className="space-y-2 pt-1">
                         {/* a) Prolonger 30j (1500F) - Orange */}
@@ -1525,6 +1553,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                   <thead>
                     <tr className="bg-slate-100 border-b border-slate-200 text-[11px] font-black uppercase tracking-wider text-slate-600">
                       <th className="py-4 px-4">Boutique</th>
+                      <th className="py-4 px-4">WhatsApp / Contact</th>
                       <th className="py-4 px-4">Parrainé par</th>
                       <th className="py-4 px-3 text-center">Filleuls</th>
                       <th className="py-4 px-3 text-center">Bonus Jours</th>
@@ -1564,7 +1593,6 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                                 </span>
                                 <div className="flex items-center gap-2 text-xs text-slate-500 font-bold">
                                   <span>👤 {b.nom_personne}</span>
-                                  {b.telephone && <span>• 📞 {b.telephone}</span>}
                                 </div>
                                 <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                                   {(() => {
@@ -1595,7 +1623,33 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                             </div>
                           </td>
 
-                          {/* 2. Parrainé par (code + nom) */}
+                          {/* 2. Contact WhatsApp Direct */}
+                          <td className="py-4 px-4 whitespace-nowrap">
+                            {b.whatsapp_number || b.telephone ? (
+                              <div className="space-y-1">
+                                <a
+                                  href={formatWaLink(b.whatsapp_number || b.telephone)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-black text-xs transition shadow-2xs"
+                                  title={`Discuter directement sur WhatsApp avec ${b.nom_personne}`}
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5 text-emerald-600 fill-emerald-600/20 shrink-0" />
+                                  <span>{b.whatsapp_number || b.telephone}</span>
+                                </a>
+                                {b.telephone && b.whatsapp_number && b.telephone !== b.whatsapp_number && (
+                                  <div className="text-[11px] font-bold text-slate-500 flex items-center gap-1 pl-1">
+                                    <Phone className="w-3 h-3 text-slate-400" />
+                                    <span>{b.telephone}</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400 italic">Non renseigné</span>
+                            )}
+                          </td>
+
+                          {/* 3. Parrainé par (code + nom) */}
                           <td className="py-4 px-4 whitespace-nowrap">
                             {b.referred_by ? (
                               <div>

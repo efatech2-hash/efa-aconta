@@ -11,6 +11,8 @@ export interface EfaBoutiqueRecord {
   nom_patron?: string;
   pin_patron_hash: string;
   pin_code?: string;
+  telephone?: string;
+  whatsapp_number?: string;
   plan: 'essai' | 'populaire' | 'pro';
   date_fin_essai: string;
   referral_code?: string;
@@ -148,12 +150,14 @@ export async function createBoutique({
   nomBoutique,
   nomPatron,
   pin,
+  whatsappNumber,
   telephone,
   email,
 }: {
   nomBoutique: string;
   nomPatron: string;
   pin: string;
+  whatsappNumber?: string;
   telephone?: string;
   email?: string;
 }): Promise<{ success: boolean; boutique?: EfaBoutiqueRecord; error?: string }> {
@@ -163,6 +167,10 @@ export async function createBoutique({
     const now = new Date();
     const trialEnd = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // 21 jours
     const boutiqueId = 'btq_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+
+    // Validation du numéro WhatsApp / téléphone
+    const finalWhatsapp = (whatsappNumber || telephone || '').trim();
+    const finalTelephone = (telephone || whatsappNumber || '').trim();
 
     // Capture du parrain depuis l'URL (?ref=CODE) ou hash
     let refBy: string | null = null;
@@ -196,6 +204,8 @@ export async function createBoutique({
       nom_patron: nomPatron.trim() || 'Patron',
       pin_patron_hash: pinHash,
       pin_code: pin,
+      telephone: finalTelephone,
+      whatsapp_number: finalWhatsapp,
       plan: 'essai',
       date_fin_essai: trialEnd.toISOString(),
       referral_code: referralCode,
@@ -211,19 +221,22 @@ export async function createBoutique({
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
       proprietaire: nomPatron.trim() || 'Patron',
+      telephone: finalTelephone,
+      whatsapp_number: finalWhatsapp,
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
       subscription_end_date: trialEnd.toISOString(),
     });
 
     // 1. Enregistrement central OBLIGATOIRE direct dans Supabase table "boutiques"
-    // (id, nom_boutique, nom, email, telephone, pin_code, referral_code, referred_by_code, plan, status='active', subscription_end_date, has_paid_annuel=false, created_at=now())
-    const centralBoutiqueData = {
+    // (id, nom_boutique, nom, email, telephone, whatsapp_number, pin_code, referral_code, referred_by_code, plan, status='active', subscription_end_date, has_paid_annuel=false, created_at=now())
+    const centralBoutiqueData: Record<string, any> = {
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
       nom: nomPatron.trim() || nomBoutique.trim(),
       email: email?.trim() || '',
-      telephone: telephone?.trim() || '',
+      telephone: finalTelephone,
+      whatsapp_number: finalWhatsapp,
       pin_code: pin,
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
@@ -243,9 +256,19 @@ export async function createBoutique({
     };
 
     // INSERT OBLIGATOIRE dans Supabase. Si l'insert échoue, on affiche une erreur et on NE crée PAS en local !
-    const { error: insertErr } = await supabase
+    let { error: insertErr } = await supabase
       .from('boutiques')
       .insert(centralBoutiqueData);
+
+    // Résilience Schéma Cache PostgREST : si une colonne nouvellement ajoutée n'est pas encore en cache
+    if (insertErr && (insertErr.message?.includes('schema cache') || insertErr.code === 'PGRST204')) {
+      console.warn('[DeviceAuth CREATE] PostgREST schema cache warning, retrying with compatible payload:', insertErr.message);
+      const fallbackPayload = { ...centralBoutiqueData };
+      if (insertErr.message?.includes('pin_code')) delete fallbackPayload.pin_code;
+      if (insertErr.message?.includes('whatsapp_number')) delete fallbackPayload.whatsapp_number;
+      const retryResult = await supabase.from('boutiques').insert(fallbackPayload);
+      insertErr = retryResult.error;
+    }
 
     if (insertErr) {
       console.error('[DeviceAuth CREATE] ERREUR INSERT BOUTIQUES OBLIGATOIRE:', insertErr);
@@ -257,22 +280,31 @@ export async function createBoutique({
 
     console.log('[DeviceAuth CREATE] SUCCÈS INSERT OBLIGATOIRE BOUTIQUES:', boutiqueId);
 
-    // 2. Enregistrement table "profiles" (même id, même referral_code, même subscription_end_date)
+    // 2. Enregistrement table "profiles" (même id, même referral_code, même subscription_end_date, même whatsapp_number)
     try {
-      const profileData = {
+      const profileData: Record<string, any> = {
         id: boutiqueId,
         user_id: boutiqueId,
         nom: nomPatron.trim() || 'Patron',
         nom_boutique: nomBoutique.trim(),
-        telephone: telephone?.trim() || '',
+        telephone: finalTelephone,
+        whatsapp_number: finalWhatsapp,
         referral_code: referralCode,
         referred_by_code: cleanReferredBy,
         subscription_end_date: trialEnd.toISOString(),
         created_at: now.toISOString(),
       };
-      const { error: profileErr } = await supabase
+      let { error: profileErr } = await supabase
         .from('profiles')
         .upsert(profileData, { onConflict: 'id' });
+
+      if (profileErr && (profileErr.message?.includes('schema cache') || profileErr.code === 'PGRST204')) {
+        const fallbackProfile = { ...profileData };
+        if (profileErr.message?.includes('whatsapp_number')) delete fallbackProfile.whatsapp_number;
+        const retryProfile = await supabase.from('profiles').upsert(fallbackProfile, { onConflict: 'id' });
+        profileErr = retryProfile.error;
+      }
+
       if (profileErr) {
         console.error('[DeviceAuth CREATE] ERREUR INSERT PROFILES:', profileErr);
       } else {
