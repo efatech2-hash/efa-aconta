@@ -285,12 +285,10 @@ export async function checkAndGiveReferralBonus(filleul: {
         .update({
           subscription_end: parrainNewEndIso,
           subscription_end_date: parrainNewEndIso,
-          fin_abonnement: parrainNewEndIso,
-          referrals_count: newReferralsCount,
-          bonus_days_earned: newBonusDays,
           is_active: true,
-          status: 'actif',
-        } as any)
+          status: 'active',
+          updated_at: new Date().toISOString(),
+        })
         .eq('id', parrain.id);
     } catch (e) {}
 
@@ -326,11 +324,11 @@ export async function checkAndGiveReferralBonus(filleul: {
         .update({
           subscription_end: filleulNewEndIso,
           subscription_end_date: filleulNewEndIso,
-          referral_bonus_given: true,
           has_paid_annuel: true,
           is_active: true,
-          status: 'actif',
-        } as any)
+          status: 'active',
+          updated_at: new Date().toISOString(),
+        })
         .eq('id', filleul.id);
     } catch (e) {}
 

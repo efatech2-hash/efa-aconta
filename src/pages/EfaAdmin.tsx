@@ -30,11 +30,12 @@ export async function prolongerAbonnement(patronId: string, daysToAdd: number = 
   } as any).eq('id', patronId);
 
   await supabase.from('boutiques').update({
-    fin_abonnement: nouvelleDateIso,
+    subscription_end_date: nouvelleDateIso,
     subscription_end: nouvelleDateIso,
-    status: 'actif',
+    status: 'active',
     is_active: true,
-  } as any).eq('id', patronId);
+    updated_at: nouvelleDateIso,
+  }).eq('id', patronId);
 
   return { nouvelle_date: nouvelleDate, nouvelle_date_iso: nouvelleDateIso };
 }
@@ -99,7 +100,8 @@ export async function activerPro1An(patronId: string) {
     is_active: true,
     status: 'active',
     last_payment_amount: 90000,
-  } as any).eq('id', patronId);
+    updated_at: nowIso,
+  }).eq('id', patronId);
 
   // Règle d'or ambassadeur : vérifie et donne bonus si filleul
   try {
@@ -170,7 +172,8 @@ export async function activer6Mois(patronId: string) {
     is_active: true,
     status: 'active',
     last_payment_amount: 50000,
-  } as any).eq('id', patronId);
+    updated_at: nowIso,
+  }).eq('id', patronId);
 
   return { plan: 'pro_6mois', fin };
 }
@@ -231,7 +234,8 @@ export async function activerPopulaire1An(patronId: string) {
     is_active: true,
     status: 'active',
     last_payment_amount: 16500,
-  } as any).eq('id', patronId);
+    updated_at: nowIso,
+  }).eq('id', patronId);
 
   // Règle d'or ambassadeur : vérifie et donne bonus si filleul
   try {

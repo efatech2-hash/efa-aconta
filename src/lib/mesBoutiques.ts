@@ -190,22 +190,30 @@ export async function createSubBoutique({
     // 2. Synchronisation distante avec boutiques et patrons
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const subSubEnd = mainPatron.fin_abonnement || mainPatron.subscription_end_date || nowIso;
         await supabase.from('boutiques').insert({
           id: subId,
           nom_boutique: finalNom,
+          nom: finalNom,
           proprietaire: mainPatron.nom || 'Patron',
+          patron_id: subId,
           email: mainPatron.email || '',
           telephone: mainPatron.telephone || '',
-          created_at: nowIso,
-          user_id: mainStoreId,
-          status: 'actif',
-          nom: finalNom,
-          patron_id: subId,
-          pin_code: mainPatron.pin_code || mainPatron.code_pin,
+          whatsapp_number: mainPatron.telephone || '',
+          whatsapp: mainPatron.telephone || '',
+          pin_code: mainPatron.pin_code || mainPatron.code_pin || '',
+          referral_code: (mainPatron as any).referral_code || null,
+          referred_by_code: (mainPatron as any).referred_by || null,
+          referred_by: (mainPatron as any).referred_by || null,
           plan: 'pro',
-          subscription_end: mainPatron.fin_abonnement || mainPatron.subscription_end_date || nowIso,
+          status: 'active',
           is_active: true,
+          has_paid_annuel: false,
+          subscription_end_date: subSubEnd,
+          subscription_end: subSubEnd,
           last_payment_amount: 0,
+          created_at: nowIso,
+          updated_at: nowIso,
         });
 
 

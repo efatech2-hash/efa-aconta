@@ -217,58 +217,55 @@ export async function createBoutique({
       created_at: now.toISOString(),
     };
 
+    const nowIso = now.toISOString();
+    const trialEndIso = trialEnd.toISOString();
+
     console.log('[DeviceAuth CREATE] Inserting new boutique into BOTH boutiques & profiles:', {
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
       proprietaire: nomPatron.trim() || 'Patron',
+      patron_id: boutiqueId,
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
+      whatsapp: finalWhatsapp,
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
-      subscription_end_date: trialEnd.toISOString(),
+      referred_by: cleanReferredBy,
+      subscription_end_date: trialEndIso,
+      subscription_end: trialEndIso,
     });
 
     // 1. Enregistrement central OBLIGATOIRE direct dans Supabase table "boutiques"
-    // (id, nom_boutique, nom, email, telephone, whatsapp_number, pin_code, referral_code, referred_by_code, plan, status='active', subscription_end_date, has_paid_annuel=false, created_at=now())
-    const centralBoutiqueData: Record<string, any> = {
+    // Liste EXACTE vérifiée: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, referred_by_code, referred_by, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
+    const centralBoutiqueData = {
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
       nom: nomPatron.trim() || nomBoutique.trim(),
+      proprietaire: nomPatron.trim() || 'Patron',
+      patron_id: boutiqueId,
       email: email?.trim() || '',
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
+      whatsapp: finalWhatsapp,
       pin_code: pin,
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
+      referred_by: cleanReferredBy,
       plan: 'essai',
       status: 'active',
-      subscription_end_date: trialEnd.toISOString(),
-      has_paid_annuel: false,
-      created_at: now.toISOString(),
-      // Champs complémentaires pour rétro-compatibilité
-      proprietaire: nomPatron.trim() || 'Patron',
-      user_id: boutiqueId,
-      patron_id: boutiqueId,
-      subscription_end: trialEnd.toISOString(),
-      referred_by: cleanReferredBy,
       is_active: true,
+      has_paid_annuel: false,
+      subscription_end_date: trialEndIso,
+      subscription_end: trialEndIso,
       last_payment_amount: 0,
+      created_at: nowIso,
+      updated_at: nowIso,
     };
 
     // INSERT OBLIGATOIRE dans Supabase. Si l'insert échoue, on affiche une erreur et on NE crée PAS en local !
-    let { error: insertErr } = await supabase
+    const { error: insertErr } = await supabase
       .from('boutiques')
       .insert(centralBoutiqueData);
-
-    // Résilience Schéma Cache PostgREST : si une colonne nouvellement ajoutée n'est pas encore en cache
-    if (insertErr && (insertErr.message?.includes('schema cache') || insertErr.code === 'PGRST204')) {
-      console.warn('[DeviceAuth CREATE] PostgREST schema cache warning, retrying with compatible payload:', insertErr.message);
-      const fallbackPayload = { ...centralBoutiqueData };
-      if (insertErr.message?.includes('pin_code')) delete fallbackPayload.pin_code;
-      if (insertErr.message?.includes('whatsapp_number')) delete fallbackPayload.whatsapp_number;
-      const retryResult = await supabase.from('boutiques').insert(fallbackPayload);
-      insertErr = retryResult.error;
-    }
 
     if (insertErr) {
       console.error('[DeviceAuth CREATE] ERREUR INSERT BOUTIQUES OBLIGATOIRE:', insertErr);

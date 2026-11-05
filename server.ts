@@ -881,13 +881,14 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
       await supabase
         .from('boutiques')
         .update({
-          plan,
-          status: 'active',
           subscription_end_date: expiryDate,
           subscription_end: expiryDate,
           has_paid_annuel: isAnnuel,
+          plan,
+          status: 'active',
           is_active: true,
           last_payment_amount: amount,
+          updated_at: new Date().toISOString(),
         })
         .eq('id', boutique_id);
     } catch (e) {}
@@ -944,12 +945,12 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
             const pEnd = parrainBtq?.subscription_end_date || parrainBtq?.subscription_end;
             if (pEnd && new Date(pEnd) > now) pBase = new Date(pEnd);
             const pNewEnd = new Date(pBase.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
-            await supabase.from('boutiques').update({ subscription_end: pNewEnd, subscription_end_date: pNewEnd, is_active: true, status: 'actif' }).eq('id', refRow.parrain_id);
+            await supabase.from('boutiques').update({ subscription_end: pNewEnd, subscription_end_date: pNewEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', refRow.parrain_id);
             await supabase.from('profiles').update({ subscription_end_date: pNewEnd }).eq('id', refRow.parrain_id);
 
             // Extension +2 mois (+60j) pour le filleul
             const fNewEnd = new Date(new Date(expiryDate).getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
-            await supabase.from('boutiques').update({ subscription_end: fNewEnd, subscription_end_date: fNewEnd, is_active: true, status: 'actif' }).eq('id', boutique_id);
+            await supabase.from('boutiques').update({ subscription_end: fNewEnd, subscription_end_date: fNewEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', boutique_id);
             await supabase.from('profiles').update({ subscription_end_date: fNewEnd }).eq('id', boutique_id);
           }
         }
@@ -975,7 +976,7 @@ app.post('/api/admin/boutiques/toggle-status', requireAdminAuth, async (req: Req
     if (!boutique_id) return res.status(400).json({ error: 'boutique_id requis' });
 
     const newActive = Boolean(is_active);
-    await supabase.from('boutiques').update({ is_active: newActive, status: newActive ? 'actif' : 'bloque' }).eq('id', boutique_id);
+    await supabase.from('boutiques').update({ is_active: newActive, status: newActive ? 'active' : 'bloque', updated_at: new Date().toISOString() }).eq('id', boutique_id);
     await supabase.from('patrons').update({ is_active: newActive }).eq('id', boutique_id);
 
     return res.json({ success: true, is_active: newActive });
@@ -996,7 +997,7 @@ app.post('/api/admin/boutiques/prolong', requireAdminAuth, async (req: Request, 
     }
 
     try {
-      await supabase.from('boutiques').update({ subscription_end: newEnd, is_active: true, status: 'actif' }).eq('id', boutique_id);
+      await supabase.from('boutiques').update({ subscription_end: newEnd, subscription_end_date: newEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', boutique_id);
     } catch {}
 
     try {

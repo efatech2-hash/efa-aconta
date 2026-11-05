@@ -153,27 +153,30 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
 );
 
 -- 11. Table Boutiques Centrale (Synchronisation multi-appareils & Super Admin)
+-- Liste EXACTE vérifiée: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, referred_by_code, referred_by, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
 CREATE TABLE IF NOT EXISTS public.boutiques (
     id TEXT PRIMARY KEY,
     nom_boutique TEXT NOT NULL,
     nom TEXT,
     proprietaire TEXT,
+    patron_id TEXT,
     email TEXT,
     telephone TEXT,
-    whatsapp_number TEXT,
-    pin_code TEXT,
     referral_code TEXT,
     referred_by_code TEXT,
-    plan TEXT DEFAULT 'essai',
-    status TEXT DEFAULT 'active',
+    referred_by TEXT,
     subscription_end_date TIMESTAMPTZ,
     subscription_end TIMESTAMPTZ,
     has_paid_annuel BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    user_id TEXT,
-    patron_id TEXT,
     is_active BOOLEAN DEFAULT TRUE,
-    last_payment_amount NUMERIC DEFAULT 0
+    last_payment_amount NUMERIC DEFAULT 0,
+    plan TEXT DEFAULT 'essai',
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    pin_code TEXT,
+    whatsapp_number TEXT,
+    whatsapp TEXT
 );
 
 -- 11b. Table Payments (Historique des paiements & activations)

@@ -348,26 +348,33 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         const nomBoutique = item.nom_boutique || item.nom_affichage || item.nom || 'Boutique EFA';
         const proprietaire = item.proprietaire || item.nom_patron || item.nom || 'Patron';
 
+        const whatsappVal = (item.whatsapp_number || item.whatsapp || item.telephone || item.phone || '').trim();
+        const phoneVal = (item.telephone || item.phone || whatsappVal).trim();
+
+        // Exact columns list: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, referred_by_code, referred_by, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
         const row = {
           id: item.id,
           nom_boutique: nomBoutique,
-          proprietaire: proprietaire,
-          email: item.email || '',
-          telephone: item.telephone || item.phone || '',
-          created_at: item.created_at || nowIso,
-          user_id: item.user_id || item.id,
-          status: item.status || (item.is_active === false ? 'bloque' : 'actif'),
           nom: nomBoutique,
+          proprietaire: proprietaire,
           patron_id: item.id,
+          email: item.email || '',
+          telephone: phoneVal,
+          whatsapp_number: whatsappVal,
+          whatsapp: whatsappVal,
           pin_code: item.pin_code || item.code_pin || '0000',
-          plan: item.plan || item.forfait || 'essai',
-          subscription_end: subEnd,
-          subscription_end_date: subEnd,
           referral_code: item.referral_code || null,
           referred_by_code: item.referred_by_code || item.referred_by || null,
-          referred_by: item.referred_by || null,
+          referred_by: item.referred_by || item.referred_by_code || null,
+          plan: item.plan || item.forfait || 'essai',
+          status: item.status || (item.is_active === false ? 'bloque' : 'active'),
           is_active: item.is_active !== false,
+          has_paid_annuel: Boolean(item.has_paid_annuel),
+          subscription_end_date: subEnd,
+          subscription_end: subEnd,
           last_payment_amount: Number(item.last_payment_amount) || Number(item.prix) || 0,
+          created_at: item.created_at || nowIso,
+          updated_at: nowIso,
         };
 
         const { error: insErr } = await supabase
@@ -623,18 +630,19 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         console.warn('[SUPER ADMIN] Note insert subscriptions:', subErr);
       }
 
-      // 3. UPDATE boutiques SET subscription_end_date, has_paid_annuel=true, plan, status='active' WHERE id=boutique_id
+      // 3. UPDATE boutiques SET subscription_end_date, subscription_end, has_paid_annuel, plan, status, is_active, last_payment_amount, updated_at
       await supabase
         .from('boutiques')
         .update({
-          plan: planCode,
-          status: 'active',
           subscription_end_date: expiryDate,
           subscription_end: expiryDate,
           has_paid_annuel: isAnnuel ? true : Boolean(boutique.has_paid_annuel),
+          plan: planCode,
+          status: 'active',
           is_active: true,
           last_payment_amount: amount,
-        } as any)
+          updated_at: nowIso,
+        })
         .eq('id', boutique.id);
 
       try {
@@ -726,7 +734,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         });
       } catch {}
 
-      await supabase.from('boutiques').update({ is_active: newActiveState, status: newActiveState ? 'actif' : 'bloque' } as any).eq('id', boutique.id);
+      await supabase.from('boutiques').update({ is_active: newActiveState, status: newActiveState ? 'active' : 'bloque', updated_at: new Date().toISOString() }).eq('id', boutique.id);
       await supabase.from('patrons').update({ is_active: newActiveState }).eq('id', boutique.id);
 
       showToast(
@@ -760,16 +768,18 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
       console.log("Prolongation OK", nouvelleDate);
 
-      // 1. Update Supabase table boutiques
+      // 1. Update Supabase table boutiques (exact columns only)
       try {
         await supabase
           .from('boutiques')
           .update({
+            subscription_end_date: nouvelleDateIso,
             subscription_end: nouvelleDateIso,
             is_active: true,
-            status: 'actif',
+            status: 'active',
             plan: 'PROLONGE',
-          } as any)
+            updated_at: now.toISOString(),
+          })
           .eq('id', boutique.id);
       } catch (errB) {}
 
