@@ -41,6 +41,7 @@ export interface AdminBoutique {
   id: string;
   nom_personne: string;
   nom_boutique: string;
+  patron_id?: string;
   pin_code: string;
   quartier?: string;
   telephone?: string;
@@ -59,6 +60,127 @@ export interface AdminBoutique {
   has_paid_annuel?: boolean;
   referrals_count?: number;
   bonus_days_earned?: number;
+}
+
+export interface PatronGroupInfo {
+  isPrincipale: boolean;
+  boutiqueIndex: number;
+  totalInGroup: number;
+  principale: AdminBoutique;
+  isSubOfPro: boolean;
+  subBadgeText: string;
+}
+
+function cleanDigits(phone?: string): string {
+  if (!phone) return '';
+  return phone.replace(/\D/g, '');
+}
+
+function cleanOwner(name?: string): string {
+  if (!name) return '';
+  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+export function computeBoutiqueGroups(allBoutiques: AdminBoutique[]): Map<string, PatronGroupInfo> {
+  const result = new Map<string, PatronGroupInfo>();
+  const n = allBoutiques.length;
+  if (n === 0) return result;
+
+  const adj: number[][] = Array.from({ length: n }, () => []);
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = allBoutiques[i];
+      const b = allBoutiques[j];
+
+      let isSame = false;
+      // 1. Même patron_id
+      if (
+        (a.patron_id && b.patron_id && a.patron_id === b.patron_id) ||
+        (a.patron_id && a.patron_id === b.id) ||
+        (b.patron_id && b.patron_id === a.id)
+      ) {
+        isSame = true;
+      }
+
+      // 2. Même téléphone / WhatsApp (au moins 8 chiffres identiques)
+      if (!isSame) {
+        const phoneA = cleanDigits(a.whatsapp_number || a.telephone);
+        const phoneB = cleanDigits(b.whatsapp_number || b.telephone);
+        if (phoneA.length >= 8 && phoneB.length >= 8 && phoneA.slice(-8) === phoneB.slice(-8)) {
+          isSame = true;
+        }
+      }
+
+      // 3. Même propriétaire (au moins 3 caractères)
+      if (!isSame) {
+        const ownerA = cleanOwner(a.nom_personne);
+        const ownerB = cleanOwner(b.nom_personne);
+        if (ownerA.length >= 3 && ownerA === ownerB) {
+          isSame = true;
+        }
+      }
+
+      if (isSame) {
+        adj[i].push(j);
+        adj[j].push(i);
+      }
+    }
+  }
+
+  const visited = new Set<number>();
+
+  for (let i = 0; i < n; i++) {
+    if (visited.has(i)) continue;
+
+    const componentIndices: number[] = [];
+    const queue = [i];
+    visited.add(i);
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      componentIndices.push(curr);
+      for (const neighbor of adj[curr]) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          queue.push(neighbor);
+        }
+      }
+    }
+
+    const groupBoutiques = componentIndices.map((idx) => allBoutiques[idx]);
+
+    // Boutique avec created_at la plus ancienne = Principale
+    groupBoutiques.sort((x, y) => {
+      const tX = x.created_at ? new Date(x.created_at).getTime() : 0;
+      const tY = y.created_at ? new Date(y.created_at).getTime() : 0;
+      if (tX !== tY) return tX - tY;
+      return x.id.localeCompare(y.id);
+    });
+
+    const principale = groupBoutiques[0];
+    const pPlan = (principale.plan || '').toLowerCase();
+    const pAmt = Number(principale.last_payment_amount) || 0;
+    const isPrincipalePro = pPlan.includes('pro') || pAmt >= 50000;
+
+    groupBoutiques.forEach((btq, index) => {
+      const boutiqueIndex = index + 1;
+      const isPrincipale = boutiqueIndex === 1;
+      const isSubOfPro = !isPrincipale && isPrincipalePro;
+      const subBadgeText = `Boutique ${boutiqueIndex} - Incluse PRO Principale`;
+
+      result.set(btq.id, {
+        isPrincipale,
+        boutiqueIndex,
+        totalInGroup: groupBoutiques.length,
+        principale,
+        isSubOfPro,
+        subBadgeText,
+      });
+    });
+  }
+
+  return result;
 }
 
 interface SuperAdminScreenProps {
@@ -246,6 +368,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       id: row.id,
       nom_personne: row.proprietaire || row.nom_patron || row.nom_personne || row.nom || 'Patron',
       nom_boutique: row.nom_boutique || row.nom_affichage || row.nom || 'Ma Boutique',
+      patron_id: row.patron_id || row.id,
       pin_code: row.pin_code || row.code_pin || '----',
       quartier: row.quartier || row.adresse || '',
       telephone: rawPhone || rawWhatsapp,
@@ -426,6 +549,15 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         console.error('[SUPER ADMIN] ERREUR FETCH BOUTIQUES:', centralErr);
       }
 
+      // Charger également la table referrals pour synchroniser parrainages et bonus
+      let centralReferrals: any[] = [];
+      try {
+        const { data: refData } = await supabase.from('referrals').select('*');
+        if (refData && Array.isArray(refData)) centralReferrals = refData;
+      } catch (e) {
+        console.warn('[SUPER ADMIN] Note lecture referrals:', e);
+      }
+
       const list: AdminBoutique[] = (centralData || []).map((row: any) => formatBoutiqueRow(row));
 
       console.log('SUPER ADMIN TOTAL BOUTIQUES REÇUES:', list.length);
@@ -439,6 +571,61 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
       for (const item of list) {
         if (item.referred_by) {
           item.parrain_nom = codeToName.get(item.referred_by.toUpperCase());
+        }
+      }
+
+      // CALCUL DES PARRAINAGES EFFECTUÉS & BONUS REÇUS POUR CHAQUE BOUTIQUE
+      for (const item of list) {
+        const myCode = item.referral_code ? item.referral_code.toUpperCase() : null;
+
+        // Filleuls parrainés par cette boutique
+        const filleulsFromBoutiques = list.filter((other) => {
+          if (other.id === item.id) return false;
+          const otherRef = other.referred_by ? other.referred_by.toUpperCase() : '';
+          return Boolean(myCode && otherRef === myCode);
+        });
+
+        const filleulsFromReferralsTable = centralReferrals.filter(
+          (r) =>
+            (myCode && r.parrain_code && r.parrain_code.toUpperCase() === myCode) ||
+            r.parrain_id === item.id
+        );
+
+        // Ensemble unique de filleuls (parrainages effectués)
+        const uniqueFilleulIds = new Set<string>();
+        filleulsFromBoutiques.forEach((f) => uniqueFilleulIds.add(f.id));
+        filleulsFromReferralsTable.forEach((r) => uniqueFilleulIds.add(r.filleul_id));
+        item.referrals_count = uniqueFilleulIds.size;
+
+        // Filleuls ayant validé leur 1 AN (donnant droit à +60j de bonus)
+        const annualFilleulIds = new Set<string>();
+        for (const f of filleulsFromBoutiques) {
+          const plan = (f.plan || '').toLowerCase();
+          const amt = Number(f.last_payment_amount) || 0;
+          if (f.has_paid_annuel || amt >= 16500 || plan.includes('annuel') || plan.includes('pro')) {
+            annualFilleulIds.add(f.id);
+          }
+        }
+        for (const r of filleulsFromReferralsTable) {
+          if (r.status === 'paid' || r.reward_given === true) {
+            annualFilleulIds.add(r.filleul_id);
+          }
+        }
+
+        item.bonus_days_earned = annualFilleulIds.size * 60;
+
+        // Statut Bonus Reçu pour cette boutique elle-même (en tant que filleul)
+        if (item.referred_by) {
+          const isAnnualPayment =
+            Boolean(item.has_paid_annuel) ||
+            (Number(item.last_payment_amount) || 0) >= 16500 ||
+            (item.plan || '').toLowerCase().includes('annuel');
+          const isRewardedInTable = centralReferrals.some(
+            (r) => r.filleul_id === item.id && (r.status === 'paid' || r.reward_given === true)
+          );
+          item.referral_bonus_given = isAnnualPayment || isRewardedInTable;
+        } else {
+          item.referral_bonus_given = false;
         }
       }
 
@@ -894,6 +1081,10 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     const revenuTotal = boutiques.reduce((sum, b) => sum + (Number(b.last_payment_amount) || 0), 0);
 
     return { total, actives, expirees, revenuTotal };
+  }, [boutiques]);
+
+  const boutiqueGroupsMap = useMemo(() => {
+    return computeBoutiqueGroups(boutiques);
   }, [boutiques]);
 
   const filteredBoutiques = useMemo(() => {
@@ -1363,11 +1554,31 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                     daysRemaining = Math.ceil((subEnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
                   }
 
+                  const groupInfo = boutiqueGroupsMap.get(b.id) || {
+                    isPrincipale: true,
+                    boutiqueIndex: 1,
+                    totalInGroup: 1,
+                    principale: b,
+                    isSubOfPro: false,
+                    subBadgeText: 'Boutique 1 - Incluse PRO Principale',
+                  };
+
                   return (
                     <div key={`mob-${b.id}`} className="p-4 space-y-3 bg-white">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <span className="font-black text-slate-900 text-sm block">{b.nom_personne}</span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-black text-slate-900 text-sm block">{b.nom_personne}</span>
+                            {groupInfo.isPrincipale ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-500 text-slate-950 shadow-2xs">
+                                PRINCIPALE
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-200 text-slate-700">
+                                BOUTIQUE {groupInfo.boutiqueIndex}
+                              </span>
+                            )}
+                          </div>
                           <span className="text-xs font-bold text-amber-700 flex items-center gap-1">
                             <Store className="w-3.5 h-3.5 text-amber-600" />
                             <span>{b.nom_boutique}</span>
@@ -1482,54 +1693,60 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                         </a>
                       )}
 
-                      {/* 4 BOUTONS D'ACTION SUR MOBILE */}
-                      <div className="space-y-2 pt-1">
-                        {/* a) Prolonger 30j (1500F) - Orange */}
-                        <button
-                          type="button"
-                          onClick={() => handleProlonger(b, 30)}
-                          className="w-full py-2.5 px-3 rounded-2xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition border border-amber-600/30 cursor-pointer"
-                          title="Prolonger de 30 jours (1.500F)"
-                        >
-                          <Calendar className="w-4 h-4 stroke-[2.5]" />
-                          <span>Prolonger 30j (1.500F)</span>
-                        </button>
-
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {/* b) Activer 6 mois (50.000F) - Violet */}
-                          <button
-                            type="button"
-                            onClick={() => handleActivateBoutique(b, 180, 50000, 'PRO 6 MOIS (50.000 F)', 'pro_6mois')}
-                            className="py-2.5 px-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer text-center leading-tight"
-                            title="Activer 6 mois (50.000F)"
-                          >
-                            <Sparkles className="w-3 h-3 shrink-0" />
-                            <span>6 Mois (50K)</span>
-                          </button>
-
-                          {/* c) Activer Pro 1 An (90.000F) - Bleu (NOUVEAU) */}
-                          <button
-                            type="button"
-                            onClick={() => handleActivateBoutique(b, 365, 90000, 'PRO 1 AN (90.000 F)', 'pro_annuel')}
-                            className="py-2.5 px-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer text-center leading-tight"
-                            title="Activer Boutique Pro 1 AN (90.000F)"
-                          >
-                            <Crown className="w-3 h-3 shrink-0" />
-                            <span>Pro 1 An (90K)</span>
-                          </button>
-
-                          {/* d) Activer Populaire 1 An (16.500F) - Jaune/GOLD */}
-                          <button
-                            type="button"
-                            onClick={() => handleActivateBoutique(b, 365, 16500, 'POPULAIRE 1 AN (16.500 F)', 'populaire')}
-                            className="py-2.5 px-1.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-slate-950 font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer border border-amber-500 text-center leading-tight"
-                            title="Activer Populaire 1 An (16.500F)"
-                          >
-                            <Sparkles className="w-3 h-3 shrink-0" />
-                            <span>Pop 1 An (16.5K)</span>
-                          </button>
+                      {/* BOUTONS D'ACTION SUR MOBILE */}
+                      {groupInfo.isSubOfPro ? (
+                        <div className="w-full py-2.5 px-3 rounded-2xl bg-slate-100 border border-slate-300 text-slate-700 font-black text-xs flex items-center justify-center gap-2 shadow-2xs">
+                          <span>{groupInfo.subBadgeText}</span>
                         </div>
-                      </div>
+                      ) : (
+                        <div className="space-y-2 pt-1">
+                          {/* a) Prolonger 30j (1500F) - Orange */}
+                          <button
+                            type="button"
+                            onClick={() => handleProlonger(b, 30)}
+                            className="w-full py-2.5 px-3 rounded-2xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition border border-amber-600/30 cursor-pointer"
+                            title="Prolonger de 30 jours (1.500F)"
+                          >
+                            <Calendar className="w-4 h-4 stroke-[2.5]" />
+                            <span>Prolonger 30j (1.500F)</span>
+                          </button>
+
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {/* b) Activer 6 mois (50.000F) - Violet */}
+                            <button
+                              type="button"
+                              onClick={() => handleActivateBoutique(b, 180, 50000, 'PRO 6 MOIS (50.000 F)', 'pro_6mois')}
+                              className="py-2.5 px-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer text-center leading-tight"
+                              title="Activer 6 mois (50.000F)"
+                            >
+                              <Sparkles className="w-3 h-3 shrink-0" />
+                              <span>6 Mois (50K)</span>
+                            </button>
+
+                            {/* c) Activer Pro 1 An (90.000F) - Bleu (NOUVEAU) */}
+                            <button
+                              type="button"
+                              onClick={() => handleActivateBoutique(b, 365, 90000, 'PRO 1 AN (90.000 F)', 'pro_annuel')}
+                              className="py-2.5 px-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer text-center leading-tight"
+                              title="Activer Boutique Pro 1 AN (90.000F)"
+                            >
+                              <Crown className="w-3 h-3 shrink-0" />
+                              <span>Pro 1 An (90K)</span>
+                            </button>
+
+                            {/* d) Activer Populaire 1 An (16.500F) - Jaune/GOLD */}
+                            <button
+                              type="button"
+                              onClick={() => handleActivateBoutique(b, 365, 16500, 'POPULAIRE 1 AN (16.500 F)', 'populaire')}
+                              className="py-2.5 px-1.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-slate-950 font-black text-[11px] flex items-center justify-center gap-1 shadow-xs transition cursor-pointer border border-amber-500 text-center leading-tight"
+                              title="Activer Populaire 1 An (16.500F)"
+                            >
+                              <Sparkles className="w-3 h-3 shrink-0" />
+                              <span>Pop 1 An (16.5K)</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="grid grid-cols-2 gap-2 pt-1">
                         <button
@@ -1586,6 +1803,15 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                         );
                       }
 
+                      const groupInfo = boutiqueGroupsMap.get(b.id) || {
+                        isPrincipale: true,
+                        boutiqueIndex: 1,
+                        totalInGroup: 1,
+                        principale: b,
+                        isSubOfPro: false,
+                        subBadgeText: 'Boutique 1 - Incluse PRO Principale',
+                      };
+
                       return (
                         <tr
                           key={b.id}
@@ -1598,9 +1824,20 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                                 <Store className="w-4 h-4 text-amber-600" />
                               </div>
                               <div>
-                                <span className="font-black text-slate-900 block">
-                                  {b.nom_boutique}
-                                </span>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-black text-slate-900 block">
+                                    {b.nom_boutique}
+                                  </span>
+                                  {groupInfo.isPrincipale ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-500 text-slate-950 shadow-2xs">
+                                      PRINCIPALE
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-200 text-slate-700">
+                                      BOUTIQUE {groupInfo.boutiqueIndex}
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="flex items-center gap-2 text-xs text-slate-500 font-bold">
                                   <span>👤 {b.nom_personne}</span>
                                 </div>
@@ -1758,55 +1995,63 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                           {/* 7. d) Actions Super Admin */}
                           <td className="py-4 px-4 text-right whitespace-nowrap">
                             <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
-                              {/* a) Prolonger 30j (1500F) - Orange */}
-                              <button
-                                type="button"
-                                onClick={() => handleProlonger(b, 30)}
-                                className="px-2.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1 border border-amber-600/30"
-                                title="Prolonger de 30 jours (1.500F)"
-                              >
-                                <Calendar className="w-3.5 h-3.5 stroke-[2.5]" />
-                                <span>Prolonger 30j (1500F)</span>
-                              </button>
+                              {groupInfo.isSubOfPro ? (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 text-slate-700 border border-slate-300 font-black text-xs shadow-2xs">
+                                  {groupInfo.subBadgeText}
+                                </span>
+                              ) : (
+                                <>
+                                  {/* a) Prolonger 30j (1500F) - Orange */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleProlonger(b, 30)}
+                                    className="px-2.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1 border border-amber-600/30"
+                                    title="Prolonger de 30 jours (1.500F)"
+                                  >
+                                    <Calendar className="w-3.5 h-3.5 stroke-[2.5]" />
+                                    <span>Prolonger 30j (1500F)</span>
+                                  </button>
 
-                              {/* b) Activer 6 mois (50.000F) - Violet */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleActivateBoutique(b, 180, 50000, 'PRO 6 MOIS (50.000 F)', 'pro_6mois')
-                                }
-                                className="px-2.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1"
-                                title="Activer Boutique Pro 6 mois (50.000 F)"
-                              >
-                                <Sparkles className="w-3 h-3" />
-                                <span>Activer 6 mois (50.000F)</span>
-                              </button>
+                                  {/* b) Activer 6 mois (50.000F) - Violet */}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleActivateBoutique(b, 180, 50000, 'PRO 6 MOIS (50.000 F)', 'pro_6mois')
+                                    }
+                                    className="px-2.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1"
+                                    title="Activer Boutique Pro 6 mois (50.000 F)"
+                                  >
+                                    <Sparkles className="w-3 h-3" />
+                                    <span>Activer 6 mois (50.000F)</span>
+                                  </button>
 
-                              {/* c) Activer Pro 1 An (90.000F) - Bleu (NOUVEAU) */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleActivateBoutique(b, 365, 90000, 'PRO 1 AN (90.000 F)', 'pro_annuel')
-                                }
-                                className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1"
-                                title="Activer Boutique Pro 1 AN (90.000 F)"
-                              >
-                                <Crown className="w-3 h-3" />
-                                <span>Pro 1 An (90.000F)</span>
-                              </button>
+                                  {/* c) Activer Pro 1 An (90.000F) - Bleu (NOUVEAU) */}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleActivateBoutique(b, 365, 90000, 'PRO 1 AN (90.000 F)', 'pro_annuel')
+                                    }
+                                    className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1"
+                                    title="Activer Boutique Pro 1 AN (90.000 F)"
+                                  >
+                                    <Crown className="w-3 h-3" />
+                                    <span>Pro 1 An (90.000F)</span>
+                                  </button>
 
-                              {/* d) Activer Populaire 1 An (16.500F) - Jaune/GOLD */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleActivateBoutique(b, 365, 16500, 'POPULAIRE 1 AN (16.500 F)', 'populaire')
-                                }
-                                className="px-2.5 py-1.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-slate-950 font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1 border border-amber-500"
-                                title="Activer Offre Populaire 1 an (16.500 F)"
-                              >
-                                <Sparkles className="w-3 h-3 text-slate-950" />
-                                <span>Populaire 1 An (16.500F)</span>
-                              </button>
+                                  {/* d) Activer Populaire 1 An (16.500F) - Jaune/GOLD */}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleActivateBoutique(b, 365, 16500, 'POPULAIRE 1 AN (16.500 F)', 'populaire')
+                                    }
+                                    className="px-2.5 py-1.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-slate-950 font-black text-xs transition cursor-pointer shadow-xs flex items-center gap-1 border border-amber-500"
+                                    title="Activer Offre Populaire 1 an (16.500 F)"
+                                  >
+                                    <Sparkles className="w-3 h-3 text-slate-950" />
+                                    <span>Populaire 1 An (16.500F)</span>
+                                  </button>
+                                </>
+                              )}
 
                               {/* Bloquer / Débloquer */}
                               <button
