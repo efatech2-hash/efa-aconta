@@ -4,6 +4,7 @@ import { queueSyncItem } from './sync';
 import { isSubscriptionExpired } from './checkLimits';
 import { verifyPin } from './security';
 import type { Patron, Produit, Employe } from './types';
+import { boutiqueToPatron } from './deviceAuth';
 
 export const PRO_MAX_ARTICLES = 300;
 export const PRO_MAX_EMPLOYEES = 10;
@@ -33,31 +34,57 @@ export function isProActive(patron?: Patron | null): boolean {
  * Récupère l'ID de la boutique principale propriétaire
  */
 export function getMainStoreId(patron: Patron): string {
-  return patron.parentId || patron.ownerId || patron.id;
+  return patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
 }
 
 /**
  * Récupère toutes les boutiques d'un propriétaire (Principale + Sous-boutiques)
+ * Synchronisation 100% Supabase
  */
 export async function getOwnerStores(ownerOrAnyStoreId: string): Promise<Patron[]> {
   try {
-    const all = await db.patrons.toArray();
+    let all = await db.patrons.toArray();
     // Si l'ID passé est une sous-boutique, on retrouve l'ID de la boutique principale (parent)
     const target = all.find((p) => p.id === ownerOrAnyStoreId);
-    const mainStoreId = target?.parentId || target?.ownerId || ownerOrAnyStoreId;
+    const mainStoreId = target?.parentId || target?.ownerId || (target as any)?.patron_id || ownerOrAnyStoreId;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const { data: remoteBtqs } = await supabase
+          .from('boutiques')
+          .select('*')
+          .or(`id.eq.${mainStoreId},patron_id.eq.${mainStoreId}`);
+
+        if (remoteBtqs && remoteBtqs.length > 0) {
+          for (const b of remoteBtqs) {
+            const mapped = boutiqueToPatron(b);
+            const isSub = b.id !== mainStoreId;
+            mapped.type = isSub ? 'SUB' : 'MAIN';
+            mapped.parentId = isSub ? mainStoreId : null;
+            mapped.isProActive = b.plan === 'pro';
+            mapped.maxBoutiques = PRO_MAX_BOUTIQUES;
+            await db.patrons.put(mapped);
+          }
+          all = await db.patrons.toArray();
+        }
+      } catch (e) {
+        console.warn('[MesBoutiques] Erreur fetch remote stores:', e);
+      }
+    }
 
     const stores = all.filter(
       (p) =>
         p.id === mainStoreId ||
         p.parentId === mainStoreId ||
-        p.ownerId === mainStoreId
+        p.ownerId === mainStoreId ||
+        (p as any).patron_id === mainStoreId
     );
 
     // Si la principale n'a pas type='MAIN', on le précise
     return stores.map((s) => ({
       ...s,
-      type: s.parentId ? ('SUB' as const) : ('MAIN' as const),
-      parentId: s.parentId || null,
+      type: s.id !== mainStoreId ? ('SUB' as const) : ('MAIN' as const),
+      parentId: s.id !== mainStoreId ? mainStoreId : null,
       maxBoutiques: PRO_MAX_BOUTIQUES,
       isProActive: true,
     }));
@@ -172,51 +199,45 @@ export async function createSubBoutique({
       Math.random().toString(36).substring(2, 6);
 
     const nowIso = new Date().toISOString();
-    const subPatron: Patron = {
-      ...mainPatron,
-      id: subId,
-      nom_boutique: finalNom,
-      parentId: mainStoreId,
-      ownerId: mainStoreId,
-      type: 'SUB',
-      isProActive: true,
-      maxBoutiques: PRO_MAX_BOUTIQUES,
-      created_at: nowIso,
-    };
+    const subSubEnd = mainPatron.subscription_end_date || mainPatron.fin_abonnement || (mainPatron as any).subscription_end || nowIso;
+    const isAnnual = Boolean((mainPatron as any).has_paid_annuel);
 
-    // 1. Sauvegarde locale dans Dexie
-    await db.patrons.put(subPatron);
+    // 1. Synchronisation obligatoire avec Supabase table 'boutiques' (Règle d'or: bloque si échec)
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const { error: insertErr } = await supabase.from('boutiques').insert({
+        id: subId,
+        nom_boutique: finalNom,
+        nom: finalNom,
+        proprietaire: mainPatron.nom || 'Patron',
+        patron_id: mainStoreId, // Regroupement sous le même patron_id
+        email: mainPatron.email || '',
+        telephone: mainPatron.telephone || '',
+        whatsapp_number: (mainPatron as any).whatsapp_number || mainPatron.telephone || '',
+        whatsapp: (mainPatron as any).whatsapp || (mainPatron as any).whatsapp_number || mainPatron.telephone || '',
+        pin_code: mainPatron.pin_code || mainPatron.code_pin || '',
+        referral_code: (mainPatron as any).referral_code || null,
+        referred_by_code: (mainPatron as any).referred_by_code || (mainPatron as any).referred_by || null,
+        referred_by: (mainPatron as any).referred_by || (mainPatron as any).referred_by_code || null,
+        plan: 'pro', // Hérite strictement du plan PRO
+        status: 'active',
+        is_active: true,
+        has_paid_annuel: isAnnual, // Hérite du statut annuel
+        subscription_end_date: subSubEnd, // Même date d'expiration
+        subscription_end: subSubEnd, // Même date d'expiration
+        last_payment_amount: 0,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
 
-    // 2. Synchronisation distante avec boutiques et patrons
-    try {
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
-        const subSubEnd = mainPatron.fin_abonnement || mainPatron.subscription_end_date || nowIso;
-        await supabase.from('boutiques').insert({
-          id: subId,
-          nom_boutique: finalNom,
-          nom: finalNom,
-          proprietaire: mainPatron.nom || 'Patron',
-          patron_id: subId,
-          email: mainPatron.email || '',
-          telephone: mainPatron.telephone || '',
-          whatsapp_number: mainPatron.telephone || '',
-          whatsapp: mainPatron.telephone || '',
-          pin_code: mainPatron.pin_code || mainPatron.code_pin || '',
-          referral_code: (mainPatron as any).referral_code || null,
-          referred_by_code: (mainPatron as any).referred_by || null,
-          referred_by: (mainPatron as any).referred_by || null,
-          plan: 'pro',
-          status: 'active',
-          is_active: true,
-          has_paid_annuel: false,
-          subscription_end_date: subSubEnd,
-          subscription_end: subSubEnd,
-          last_payment_amount: 0,
-          created_at: nowIso,
-          updated_at: nowIso,
-        });
+      if (insertErr) {
+        console.error('[MesBoutiques] Erreur Supabase création sous-boutique:', insertErr);
+        return {
+          success: false,
+          error: `Échec création sur Supabase: ${insertErr.message}`,
+        };
+      }
 
-
+      try {
         await supabase.from('patrons').insert({
           id: subId,
           nom: mainPatron.nom,
@@ -229,11 +250,28 @@ export async function createSubBoutique({
           is_active: true,
           created_at: nowIso,
         } as any);
-      }
-    } catch (remoteErr) {
-      console.warn('[MesBoutiques] Sync sub-boutique différée:', remoteErr);
+      } catch {}
     }
 
+    const subPatron: Patron = {
+      ...mainPatron,
+      id: subId,
+      nom_boutique: finalNom,
+      parentId: mainStoreId,
+      ownerId: mainStoreId,
+      type: 'SUB',
+      subscription_status: 'pro',
+      current_plan: 'pro',
+      isProActive: true,
+      has_paid_annuel: isAnnual,
+      subscription_end_date: subSubEnd,
+      abonnement_expire: subSubEnd,
+      maxBoutiques: PRO_MAX_BOUTIQUES,
+      created_at: nowIso,
+    };
+
+    // 2. Sauvegarde locale dans Dexie seulement après succès
+    await db.patrons.put(subPatron);
     await queueSyncItem('patrons', 'insert', subId, subPatron);
 
     return { success: true, boutique: subPatron };

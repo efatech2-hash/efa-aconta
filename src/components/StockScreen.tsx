@@ -392,25 +392,46 @@ export const StockScreen: React.FC<StockScreenProps> = ({
         created_at: new Date().toISOString(),
       };
 
-      await db.produits.put(newProd);
-      await queueSyncItem('produits', 'insert', newProd.id, newProd);
-
-      // Synchro distante vers Supabase aconta_produits
-      try {
-        await supabase.from('aconta_produits').upsert([{
+      // 1. Enregistrement obligatoire sur Supabase (bloque si échec)
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const { error: insertErr } = await supabase.from('produits').insert([{
           id: prodId,
-          user_id: patron.id,
+          patron_id: patron.id,
           nom: newProd.nom,
           categorie: newProd.categorie,
           prix_vente: newProd.prix_vente,
           prix_achat: newProd.prix_achat,
           stock_qte: newProd.stock_qte,
-          photo_url: newProd.photo_url,
+          seuil_alerte: newProd.seuil_alerte,
+          photo_url: finalPhoto,
           created_at: newProd.created_at,
         }]);
-      } catch (syncErr) {
-        // En cas d'indisponibilité, la file de synchro prend le relai
+
+        if (insertErr) {
+          console.error('[StockScreen] Erreur Supabase:', insertErr);
+          alert(`Erreur Supabase: ${insertErr.message}`);
+          setIsSaving(false);
+          return;
+        }
+
+        try {
+          await supabase.from('aconta_produits').upsert([{
+            id: prodId,
+            user_id: patron.id,
+            nom: newProd.nom,
+            categorie: newProd.categorie,
+            prix_vente: newProd.prix_vente,
+            prix_achat: newProd.prix_achat,
+            stock_qte: newProd.stock_qte,
+            photo_url: newProd.photo_url,
+            created_at: newProd.created_at,
+          }]);
+        } catch {}
       }
+
+      // 2. Cache local Dexie
+      await db.produits.put(newProd);
+      await queueSyncItem('produits', 'insert', newProd.id, newProd);
 
       // Log historique ajout stock
       logAction({

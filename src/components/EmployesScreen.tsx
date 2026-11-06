@@ -304,6 +304,38 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
         created_at: new Date().toISOString(),
       };
 
+      // 1. Enregistrement obligatoire sur Supabase table 'employes' (bloque si échec)
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const { error: empErr } = await supabase.from('employes').insert([{
+          id: empId,
+          patron_id: patron.id,
+          nom: newEmploye.nom,
+          telephone: newEmploye.telephone,
+          phone_country: newEmploye.phone_country,
+          phone_number: newEmploye.phone_number,
+          phone_full: newEmploye.phone_full,
+          pin_hash: newEmploye.pin_hash,
+          pin_code: newEmploye.pin_code,
+          code_pin: newEmploye.code_pin,
+          status: newEmploye.status,
+          is_active: newEmploye.is_active,
+          genre: newEmploye.genre,
+          photo_url: newEmploye.photo_url || null,
+          role: newEmploye.role,
+          subscription_status: newEmploye.subscription_status,
+          created_at: newEmploye.created_at,
+        }]);
+
+        if (empErr) {
+          console.error('[EmployesScreen] Erreur Supabase:', empErr);
+          setFeedback(`Erreur Supabase: ${empErr.message}`);
+          speakFrench("Échec de l'enregistrement de l'employé sur Supabase");
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // 2. Cache local Dexie
       await db.employes.put(newEmploye);
       await queueSyncItem('employes', 'insert', empId, newEmploye);
 

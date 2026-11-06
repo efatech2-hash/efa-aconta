@@ -470,6 +470,174 @@ export default function App() {
         if (typeof window !== 'undefined') localStorage.setItem('entreprise_id', currentPatron.id);
         syncEmployeesSubscription(currentPatron.id, currentPatron.subscription_status || 'trial').catch(() => {});
 
+        // 4. Synchronisation 100% Supabase au démarrage / login / vidage cache
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          try {
+            // A. Si sous-boutique, hérite du forfait PRO et expiration du parent
+            const parentId = currentPatron.parentId || (currentPatron as any).patron_id;
+            if (parentId && parentId !== currentPatron.id) {
+              const { data: parentBtq } = await supabase
+                .from('boutiques')
+                .select('*')
+                .eq('id', parentId)
+                .maybeSingle();
+              if (parentBtq && (parentBtq.plan === 'pro' || isProActive(parentBtq as any))) {
+                currentPatron.subscription_status = 'pro';
+                currentPatron.current_plan = 'pro';
+                currentPatron.isProActive = true;
+                currentPatron.subscription_end_date = parentBtq.subscription_end_date || parentBtq.subscription_end;
+                currentPatron.abonnement_expire = parentBtq.subscription_end_date || parentBtq.subscription_end;
+                currentPatron.has_paid_annuel = Boolean(parentBtq.has_paid_annuel);
+                currentPatron.statut = 'ACTIF';
+                await db.patrons.put(currentPatron);
+              }
+            }
+
+            // B. Rechargement complet des produits depuis Supabase
+            const { data: remoteProds } = await supabase
+              .from('produits')
+              .select('*')
+              .eq('patron_id', currentPatron.id);
+
+            if (remoteProds && remoteProds.length > 0) {
+              await db.produits.bulkPut(
+                remoteProds.map((p) => ({
+                  id: p.id,
+                  patron_id: currentPatron.id,
+                  nom: p.nom,
+                  prix_achat: Number(p.prix_achat) || 0,
+                  prix_vente: Number(p.prix_vente) || 0,
+                  stock_qte: Number(p.stock_qte) || 0,
+                  seuil_alerte: Number(p.seuil_alerte) ?? 5,
+                  categorie: p.categorie || 'Général',
+                  photo_url: p.photo_url || '',
+                  created_at: p.created_at || new Date().toISOString(),
+                }))
+              );
+            } else {
+              // Fallback aconta_produits
+              const { data: acontaProds } = await supabase
+                .from('aconta_produits')
+                .select('*')
+                .eq('user_id', currentPatron.id);
+              if (acontaProds && acontaProds.length > 0) {
+                await db.produits.bulkPut(
+                  acontaProds.map((p) => ({
+                    id: p.id,
+                    patron_id: currentPatron.id,
+                    nom: p.nom,
+                    prix_achat: Number(p.prix_achat) || 0,
+                    prix_vente: Number(p.prix_vente) || 0,
+                    stock_qte: Number(p.stock_qte) || 0,
+                    seuil_alerte: 5,
+                    categorie: p.categorie || 'Général',
+                    photo_url: p.photo_url || '',
+                    created_at: p.created_at || new Date().toISOString(),
+                  }))
+                );
+              }
+            }
+
+            // C. Rechargement des employés depuis Supabase
+            const { data: remoteEmps } = await supabase
+              .from('employes')
+              .select('*')
+              .eq('patron_id', currentPatron.id);
+            if (remoteEmps && remoteEmps.length > 0) {
+              await db.employes.bulkPut(
+                remoteEmps.map((e) => ({
+                  id: e.id,
+                  patron_id: currentPatron.id,
+                  nom: e.nom,
+                  role: e.role || 'vendeuse',
+                  telephone: e.telephone || '',
+                  phone_country: e.phone_country || '+228',
+                  phone_number: e.phone_number || '',
+                  phone_full: e.phone_full || e.telephone || '',
+                  pin_hash: e.pin_hash || '',
+                  pin_code: e.code_pin || e.pin_code || '',
+                  code_pin: e.code_pin || e.pin_code || '',
+                  status: e.status || 'active',
+                  is_active: e.is_active !== false,
+                  genre: e.genre || 'femme',
+                  photo_url: e.photo_url,
+                  subscription_status: currentPatron.subscription_status || 'trial',
+                  created_at: e.created_at || new Date().toISOString(),
+                }))
+              );
+            }
+
+            // D. Rechargement des ventes depuis Supabase
+            const { data: remoteVentes } = await supabase
+              .from('ventes')
+              .select('*')
+              .eq('patron_id', currentPatron.id);
+            if (remoteVentes && remoteVentes.length > 0) {
+              await db.ventes.bulkPut(
+                remoteVentes.map((v) => ({
+                  id: v.id,
+                  ticket_id: v.ticket_id || v.id,
+                  patron_id: currentPatron.id,
+                  produit_id: v.produit_id || '',
+                  produit_nom: v.produit_nom || '',
+                  qte: Number(v.qte) || 1,
+                  montant_total: Number(v.montant_total) || 0,
+                  client_nom: v.client_nom || '',
+                  est_credit: Boolean(v.est_credit),
+                  reste_a_payer: Number(v.reste_a_payer) || 0,
+                  vendu_par_id: v.vendu_par_id || currentPatron.id,
+                  vendu_par_nom: v.vendu_par_nom || currentPatron.nom,
+                  vendu_par_genre: v.vendu_par_genre || 'femme',
+                  date: v.date || new Date().toISOString(),
+                  synced: true,
+                }))
+              );
+            }
+
+            // E. Rechargement des dépenses depuis Supabase
+            const { data: remoteDep } = await supabase
+              .from('depenses')
+              .select('*')
+              .eq('patron_id', currentPatron.id);
+            if (remoteDep && remoteDep.length > 0) {
+              await db.depenses.bulkPut(
+                remoteDep.map((d) => ({
+                  id: d.id,
+                  patron_id: currentPatron.id,
+                  type: d.type || 'autre',
+                  montant: Number(d.montant) || 0,
+                  description: d.description || '',
+                  cree_par: d.cree_par || currentPatron.nom,
+                  date: d.date || new Date().toISOString(),
+                  synced: true,
+                }))
+              );
+            }
+
+            // F. Rechargement des crédits depuis Supabase
+            const { data: remoteCred } = await supabase
+              .from('credits')
+              .select('*')
+              .eq('patron_id', currentPatron.id);
+            if (remoteCred && remoteCred.length > 0) {
+              await db.credits.bulkPut(
+                remoteCred.map((c) => ({
+                  id: c.id,
+                  patron_id: currentPatron.id,
+                  client_nom: c.client_nom || '',
+                  montant_initial: Number(c.montant_initial) || 0,
+                  reste_a_payer: Number(c.reste_a_payer) || 0,
+                  telephone: c.telephone || '',
+                  dernier_paiement: c.dernier_paiement || new Date().toISOString(),
+                  synced: true,
+                }))
+              );
+            }
+          } catch (syncErr) {
+            console.warn('[App] Erreur sync entités Supabase:', syncErr);
+          }
+        }
+
         // Boutiques du propriétaire & vérification verrouillage appareil
         try {
           const mainId = getMainStoreId(currentPatron);

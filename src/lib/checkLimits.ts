@@ -171,15 +171,19 @@ export function getArticleLimitInfo(patron: Patron | null | undefined, currentCo
   const max = limits[status] ?? 7;
   const isTrial = status === 'trial' || status === 'free';
   const allowed = !isSubscriptionExpired(patron) && currentCount < max;
+  const remaining = Math.max(0, max - currentCount);
   return {
     allowed,
     max,
     current: currentCount,
+    remaining,
     isTrial,
     status,
-    message: isTrial
-      ? `Limite atteinte - Essai gratuit = 7 articles max. Passez à Populaire pour illimité`
-      : `Limite de ${max} articles atteinte pour votre forfait actuel.`,
+    message: allowed
+      ? `${remaining} articles restants (quota : ${currentCount}/${max})`
+      : (isTrial
+        ? `Limite atteinte - Essai gratuit = 7 articles max. Passez à Populaire pour 100 articles`
+        : `Limite de ${max} articles atteinte pour votre forfait actuel.`),
   };
 }
 
@@ -223,15 +227,19 @@ export function getVendeurLimitInfo(patron: Patron | null | undefined, currentCo
   const max = limits[status] ?? 1;
   const isTrial = status === 'trial' || status === 'free';
   const allowed = !isSubscriptionExpired(patron) && currentCount < max;
+  const remaining = Math.max(0, max - currentCount);
   return {
     allowed,
     max,
     current: currentCount,
+    remaining,
     isTrial,
     status,
-    message: isTrial
-      ? `1 vendeur max en essai gratuit. Passez à Populaire ou Boutique Pro pour ajouter plus de vendeurs.`
-      : `Limite de ${max} vendeurs atteinte pour votre forfait actuel.`,
+    message: allowed
+      ? `${remaining} vendeurs restants (quota : ${currentCount}/${max})`
+      : (isTrial
+        ? `1 vendeur max en essai gratuit. Passez à Populaire (3 vendeurs) ou Boutique Pro (10 vendeurs).`
+        : `Limite de ${max} vendeurs atteinte pour votre forfait actuel.`),
   };
 }
 
@@ -247,11 +255,11 @@ export function canAddAppareil(patron: Patron | null | undefined, currentCount: 
     free: 1,
     populaire: 3,
     pro: 5,
-    trial: 2,
+    trial: 1, // Strict: 1 appareil max en essai gratuit
     expired: 0,
   };
 
-  const max = limits[status] ?? 2;
+  const max = limits[status] ?? 1;
   return currentCount < max;
 }
 
@@ -500,9 +508,41 @@ export async function activateSubscription(
   // 4. Synchroniser tous les employés
   await syncEmployeesSubscription(patron.id, newPlan);
 
-  // 5. Tentative de sync directe avec le backend / Supabase
+  // 5. Tentative de sync directe avec Supabase table boutiques
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const isAnnual = billingCycle === 'annuel';
+      const paymentAmount = newPlan === 'pro' ? (isAnnual ? 90000 : 50000) : 16500;
+      await supabase
+        .from('boutiques')
+        .update({
+          plan: newPlan,
+          status: 'active',
+          is_active: true,
+          has_paid_annuel: isAnnual,
+          subscription_end_date: expiresAt,
+          subscription_end: expiresAt,
+          last_payment_amount: paymentAmount,
+          updated_at: now.toISOString(),
+        })
+        .eq('id', patron.id);
+
+      // Si Pro, les sous-boutiques héritent du même plan et expiration
+      if (newPlan === 'pro') {
+        await supabase
+          .from('boutiques')
+          .update({
+            plan: 'pro',
+            status: 'active',
+            is_active: true,
+            has_paid_annuel: isAnnual,
+            subscription_end_date: expiresAt,
+            subscription_end: expiresAt,
+            updated_at: now.toISOString(),
+          })
+          .eq('patron_id', patron.id);
+      }
+
       await supabase
         .from('patrons')
         .update({
@@ -511,15 +551,6 @@ export async function activateSubscription(
           subscription_end_date: expiresAt,
         })
         .eq('id', patron.id);
-
-      await supabase
-        .from('abonnements')
-        .upsert({
-          entreprise_id: patron.id,
-          statut: 'actif',
-          plan: newPlan,
-          expire_le: expiresAt,
-        }, { onConflict: 'entreprise_id' });
     }
   } catch (err) {
     console.warn('Sync distant abonnement différé:', err);

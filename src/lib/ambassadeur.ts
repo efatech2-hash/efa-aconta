@@ -280,11 +280,20 @@ export async function checkAndGiveReferralBonus(filleul: {
 
     // 9. METTRE À JOUR PARRAIN DANS BOUTIQUES, PROFILES, PATRONS
     try {
+      const parrainPlanRaw = (parrain.plan || '').toLowerCase();
+      // Si parrain est PRO ou POPULAIRE, il GARDE son plan. Jamais retour en ESSAI.
+      const preservedParrainPlan = parrainPlanRaw.includes('pro')
+        ? 'pro'
+        : parrainPlanRaw.includes('pop')
+        ? 'populaire'
+        : parrainPlanRaw || 'populaire';
+
       await supabase
         .from('boutiques')
         .update({
           subscription_end: parrainNewEndIso,
           subscription_end_date: parrainNewEndIso,
+          plan: preservedParrainPlan,
           is_active: true,
           status: 'active',
           updated_at: new Date().toISOString(),
@@ -319,11 +328,15 @@ export async function checkAndGiveReferralBonus(filleul: {
 
     // 10. METTRE À JOUR FILLEUL DANS BOUTIQUES, PROFILES, PATRONS
     try {
+      const filleulPlanRaw = (filleulPlan || '').toLowerCase();
+      const preservedFilleulPlan = filleulPlanRaw.includes('pro') ? 'pro' : 'populaire';
+
       await supabase
         .from('boutiques')
         .update({
           subscription_end: filleulNewEndIso,
           subscription_end_date: filleulNewEndIso,
+          plan: preservedFilleulPlan,
           has_paid_annuel: true,
           is_active: true,
           status: 'active',

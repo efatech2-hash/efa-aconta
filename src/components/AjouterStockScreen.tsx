@@ -219,22 +219,46 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
     };
 
     try {
-      await db.produits.put(newProduit);
-      await queueSyncItem('produits', 'insert', prodId, newProduit);
-
-      // Synchro directe Supabase aconta_produits
-      try {
-        await supabase.from('aconta_produits').upsert([{
+      // 1. Enregistrement obligatoire sur Supabase (bloque si échec)
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const { error: insertErr } = await supabase.from('produits').insert([{
           id: prodId,
-          user_id: patron.id,
+          patron_id: patron.id,
           nom: newProduit.nom,
           prix_vente: newProduit.prix_vente,
           prix_achat: newProduit.prix_achat,
           stock_qte: newProduit.stock_qte,
-          photo_url: newProduit.photo_url,
+          seuil_alerte: newProduit.seuil_alerte,
+          photo_url: finalPhotoUrl,
           created_at: newProduit.created_at,
         }]);
-      } catch {}
+
+        if (insertErr) {
+          console.error('[AjouterStock] Erreur Supabase:', insertErr);
+          setFeedback(`Erreur Supabase: ${insertErr.message}`);
+          speakFrench("Échec de l'enregistrement sur Supabase");
+          setIsLoading(false);
+          return;
+        }
+
+        // Miroir aconta_produits
+        try {
+          await supabase.from('aconta_produits').upsert([{
+            id: prodId,
+            user_id: patron.id,
+            nom: newProduit.nom,
+            prix_vente: newProduit.prix_vente,
+            prix_achat: newProduit.prix_achat,
+            stock_qte: newProduit.stock_qte,
+            photo_url: finalPhotoUrl,
+            created_at: newProduit.created_at,
+          }]);
+        } catch {}
+      }
+
+      // 2. Cache local Dexie
+      await db.produits.put(newProduit);
+      await queueSyncItem('produits', 'insert', prodId, newProduit);
 
       // MODIF 1: Log historique ajout stock
       logAction({
