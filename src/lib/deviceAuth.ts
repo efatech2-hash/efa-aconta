@@ -13,6 +13,7 @@ export interface EfaBoutiqueRecord {
   pin_code?: string;
   telephone?: string;
   whatsapp_number?: string;
+  genre?: 'femme' | 'homme';
   plan: 'essai' | 'populaire' | 'pro';
   date_fin_essai: string;
   referral_code?: string;
@@ -122,7 +123,7 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
     pin_code: pin,
     code_pin: pin,
     pin_hash: b.pin_patron_hash || (b as any).pin_hash,
-    genre: 'femme',
+    genre: (b as any).genre === 'homme' ? 'homme' : 'femme',
     role: 'patron',
     abonnement_expire: finAbonnement || b.date_fin_essai,
     subscription_status: (b as any).statut === 'ACTIF' || (b as any).status === 'actif' ? 'populaire' : (b.plan === 'essai' ? 'trial' : (b.plan as any)),
@@ -150,6 +151,7 @@ export async function createBoutique({
   nomBoutique,
   nomPatron,
   pin,
+  genre,
   whatsappNumber,
   telephone,
   email,
@@ -157,6 +159,7 @@ export async function createBoutique({
   nomBoutique: string;
   nomPatron: string;
   pin: string;
+  genre?: 'femme' | 'homme';
   whatsappNumber?: string;
   telephone?: string;
   email?: string;
@@ -167,6 +170,7 @@ export async function createBoutique({
     const now = new Date();
     const trialEnd = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000); // 21 jours
     const boutiqueId = 'btq_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+    const finalGenre = genre === 'homme' ? 'homme' : 'femme';
 
     // Validation du numéro WhatsApp / téléphone
     const finalWhatsapp = (whatsappNumber || telephone || '').trim();
@@ -204,6 +208,7 @@ export async function createBoutique({
       nom_patron: nomPatron.trim() || 'Patron',
       pin_patron_hash: pinHash,
       pin_code: pin,
+      genre: finalGenre,
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
       plan: 'essai',
@@ -225,6 +230,7 @@ export async function createBoutique({
       nom_boutique: nomBoutique.trim(),
       proprietaire: nomPatron.trim() || 'Patron',
       patron_id: boutiqueId,
+      genre: finalGenre,
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
       whatsapp: finalWhatsapp,
@@ -236,8 +242,8 @@ export async function createBoutique({
     });
 
     // 1. Enregistrement central OBLIGATOIRE direct dans Supabase table "boutiques"
-    // Liste EXACTE vérifiée: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, referred_by_code, referred_by, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
-    const centralBoutiqueData = {
+    // Sauvegarde du genre dans boutiques.genre
+    const centralBoutiqueData: Record<string, any> = {
       id: boutiqueId,
       nom_boutique: nomBoutique.trim(),
       nom: nomPatron.trim() || nomBoutique.trim(),
@@ -247,6 +253,7 @@ export async function createBoutique({
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
       whatsapp: finalWhatsapp,
+      genre: finalGenre,
       pin_code: pin,
       referral_code: referralCode,
       referred_by_code: cleanReferredBy,
@@ -262,10 +269,17 @@ export async function createBoutique({
       updated_at: nowIso,
     };
 
-    // INSERT OBLIGATOIRE dans Supabase. Si l'insert échoue, on affiche une erreur et on NE crée PAS en local !
-    const { error: insertErr } = await supabase
+    // INSERT OBLIGATOIRE dans Supabase.
+    let { error: insertErr } = await supabase
       .from('boutiques')
       .insert(centralBoutiqueData);
+
+    if (insertErr && (insertErr.message?.includes('genre') || insertErr.code === 'PGRST204')) {
+      const fallbackData = { ...centralBoutiqueData };
+      delete fallbackData.genre;
+      const retry = await supabase.from('boutiques').insert(fallbackData);
+      insertErr = retry.error;
+    }
 
     if (insertErr) {
       console.error('[DeviceAuth CREATE] ERREUR INSERT BOUTIQUES OBLIGATOIRE:', insertErr);

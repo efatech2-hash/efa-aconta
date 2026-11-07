@@ -196,13 +196,15 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
     const prodId = 'prod-' + Date.now();
     let finalPhotoUrl = photoUrl;
 
-    // Upload WebP compressé vers bucket 'efa-aconta-produits' avec chemin ${user_id}/${produit_id}.webp
+    // D'ABORD uploader le vrai fichier vers le bucket 'efa-aconta-produits'
     if (photoUrl) {
       try {
         const uploaded = await uploadProductImage(photoUrl, patron.id, prodId, userPlan);
         if (uploaded) finalPhotoUrl = uploaded;
       } catch (uploadErr) {
-        console.warn('[AjouterStock] Erreur upload image, conservation locale:', uploadErr);
+        console.error('[AjouterStock] Échec upload image, création produit annulée:', uploadErr);
+        setIsLoading(false);
+        return; // NE PAS créer le produit si l'upload échoue !
       }
     }
 

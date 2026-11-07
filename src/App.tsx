@@ -473,37 +473,68 @@ export default function App() {
         // 4. Synchronisation 100% Supabase au démarrage / login / vidage cache
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            // A. Si sous-boutique, hérite du forfait PRO et expiration du parent
-            const parentId = currentPatron.parentId || (currentPatron as any).patron_id;
-            if (parentId && parentId !== currentPatron.id) {
+            // A. Si sous-boutique ou boutique 2/3 du même patron_id, hérite du forfait PRO et expiration du parent
+            const patronOwnerId = currentPatron.parentId || (currentPatron as any).patron_id;
+            if (patronOwnerId && patronOwnerId !== currentPatron.id) {
               const { data: parentBtq } = await supabase
                 .from('boutiques')
                 .select('*')
-                .eq('id', parentId)
+                .eq('id', patronOwnerId)
                 .maybeSingle();
-              if (parentBtq && (parentBtq.plan === 'pro' || isProActive(parentBtq as any))) {
+              if (parentBtq && (parentBtq.plan === 'pro' || Number(parentBtq.last_payment_amount) >= 50000 || isProActive(parentBtq as any))) {
                 currentPatron.subscription_status = 'pro';
                 currentPatron.current_plan = 'pro';
                 currentPatron.isProActive = true;
+                currentPatron.type = 'SUB';
+                currentPatron.parentId = patronOwnerId;
+                currentPatron.isSubOfPro = true;
+                currentPatron.subBadgeText = 'PRO - Incluse dans Principale';
                 currentPatron.subscription_end_date = parentBtq.subscription_end_date || parentBtq.subscription_end;
                 currentPatron.abonnement_expire = parentBtq.subscription_end_date || parentBtq.subscription_end;
                 currentPatron.has_paid_annuel = Boolean(parentBtq.has_paid_annuel);
                 currentPatron.statut = 'ACTIF';
                 await db.patrons.put(currentPatron);
               }
+            } else if (currentPatron.telephone) {
+              // Vérifie aussi par téléphone/WhatsApp si boutique 2 ou 3 créée sous le même patron
+              const { data: siblings } = await supabase
+                .from('boutiques')
+                .select('*')
+                .or(`telephone.eq.${currentPatron.telephone},whatsapp_number.eq.${currentPatron.telephone}`)
+                .order('created_at', { ascending: true });
+              if (siblings && siblings.length > 1) {
+                const mainSibling = siblings[0];
+                const isMainPro = mainSibling.plan === 'pro' || Number(mainSibling.last_payment_amount) >= 50000;
+                if (isMainPro && mainSibling.id !== currentPatron.id) {
+                  currentPatron.subscription_status = 'pro';
+                  currentPatron.current_plan = 'pro';
+                  currentPatron.isProActive = true;
+                  currentPatron.type = 'SUB';
+                  currentPatron.parentId = mainSibling.id;
+                  currentPatron.isSubOfPro = true;
+                  currentPatron.subBadgeText = 'PRO - Incluse dans Principale';
+                  currentPatron.subscription_end_date = mainSibling.subscription_end_date || mainSibling.subscription_end;
+                  currentPatron.abonnement_expire = mainSibling.subscription_end_date || mainSibling.subscription_end;
+                  currentPatron.has_paid_annuel = Boolean(mainSibling.has_paid_annuel);
+                  currentPatron.statut = 'ACTIF';
+                  await db.patrons.put(currentPatron);
+                }
+              }
             }
 
-            // B. Rechargement complet des produits depuis Supabase
+            // B. Rechargement complet des produits UNIQUEMENT depuis Supabase
             const { data: remoteProds } = await supabase
               .from('produits')
               .select('*')
-              .eq('patron_id', currentPatron.id);
+              .order('created_at', { ascending: false });
 
             if (remoteProds && remoteProds.length > 0) {
+              const matchingProds = remoteProds.filter((p: any) => !p.patron_id || p.patron_id === currentPatron.id);
+              const prodsToStore = matchingProds.length > 0 ? matchingProds : remoteProds;
               await db.produits.bulkPut(
-                remoteProds.map((p) => ({
+                prodsToStore.map((p) => ({
                   id: p.id,
-                  patron_id: currentPatron.id,
+                  patron_id: p.patron_id || currentPatron.id,
                   nom: p.nom,
                   prix_achat: Number(p.prix_achat) || 0,
                   prix_vente: Number(p.prix_vente) || 0,
@@ -514,42 +545,22 @@ export default function App() {
                   created_at: p.created_at || new Date().toISOString(),
                 }))
               );
-            } else {
-              // Fallback aconta_produits
-              const { data: acontaProds } = await supabase
-                .from('aconta_produits')
-                .select('*')
-                .eq('user_id', currentPatron.id);
-              if (acontaProds && acontaProds.length > 0) {
-                await db.produits.bulkPut(
-                  acontaProds.map((p) => ({
-                    id: p.id,
-                    patron_id: currentPatron.id,
-                    nom: p.nom,
-                    prix_achat: Number(p.prix_achat) || 0,
-                    prix_vente: Number(p.prix_vente) || 0,
-                    stock_qte: Number(p.stock_qte) || 0,
-                    seuil_alerte: 5,
-                    categorie: p.categorie || 'Général',
-                    photo_url: p.photo_url || '',
-                    created_at: p.created_at || new Date().toISOString(),
-                  }))
-                );
-              }
             }
 
-            // C. Rechargement des employés depuis Supabase
+            // C. Rechargement des employés UNIQUEMENT depuis Supabase
             const { data: remoteEmps } = await supabase
               .from('employes')
               .select('*')
-              .eq('patron_id', currentPatron.id);
+              .order('created_at', { ascending: false });
             if (remoteEmps && remoteEmps.length > 0) {
+              const matchingEmps = remoteEmps.filter((e: any) => !e.patron_id || e.patron_id === currentPatron.id);
+              const empsToStore = matchingEmps.length > 0 ? matchingEmps : remoteEmps;
               await db.employes.bulkPut(
-                remoteEmps.map((e) => ({
+                empsToStore.map((e) => ({
                   id: e.id,
-                  patron_id: currentPatron.id,
+                  patron_id: e.patron_id || currentPatron.id,
                   nom: e.nom,
-                  role: e.role || 'vendeuse',
+                  role: (e.role as any) || 'vendeuse',
                   telephone: e.telephone || '',
                   phone_country: e.phone_country || '+228',
                   phone_number: e.phone_number || '',
@@ -656,7 +667,7 @@ export default function App() {
         }
 
         // Filtrage strict par currentPatron.id (boutique_id)
-        const [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
+        let [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
           db.employes.where('patron_id').equals(currentPatron.id).toArray(),
           db.produits.where('patron_id').equals(currentPatron.id).toArray(),
           db.ventes.where('patron_id').equals(currentPatron.id).toArray(),
@@ -664,6 +675,12 @@ export default function App() {
           db.credits.where('patron_id').equals(currentPatron.id).toArray(),
           db.parrainage.where('parrain_id').equals(currentPatron.id).toArray(),
         ]);
+        if (prodList.length === 0) {
+          prodList = await db.produits.toArray();
+        }
+        if (empList.length === 0) {
+          empList = await db.employes.toArray();
+        }
         setEmployes(empList);
         setProducts(prodList);
         setVentes(ventList);

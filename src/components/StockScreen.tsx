@@ -108,6 +108,40 @@ export const StockScreen: React.FC<StockScreenProps> = ({
     }
   }, [patron, products, isPro, mainStoreId]);
 
+  // Bug 2: Chargement direct des produits depuis Supabase au montage de la vitrine / liste
+  React.useEffect(() => {
+    async function loadFreshProductsFromSupabase() {
+      try {
+        const { data, error } = await supabase
+          .from('produits')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (!error && data && data.length > 0) {
+          const fresh = data.map((p) => ({
+            id: p.id,
+            patron_id: p.patron_id || patron.id,
+            nom: p.nom,
+            prix_achat: Number(p.prix_achat) || 0,
+            prix_vente: Number(p.prix_vente) || 0,
+            stock_qte: Number(p.stock_qte) || 0,
+            seuil_alerte: Number(p.seuil_alerte) ?? 5,
+            categorie: p.categorie || 'Général',
+            photo_url: p.photo_url || '',
+            created_at: p.created_at || new Date().toISOString(),
+          }));
+          await db.produits.bulkPut(fresh);
+          onRefresh();
+        }
+      } catch (err) {
+        console.warn('[StockScreen] Erreur chargement Supabase:', err);
+      }
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      loadFreshProductsFromSupabase();
+    }
+  }, [patron.id]);
+
   // Séparation stock bas et stock normal
   const stockBasProducts = products.filter((p) => {
     const seuil = p.seuil_alerte ?? 5;
@@ -373,10 +407,16 @@ export const StockScreen: React.FC<StockScreenProps> = ({
       const prodId = 'prod-' + Date.now();
       let finalPhoto = newPhotoUrl || '';
 
-      // 2. Upload WebP compressé dans le bucket 'efa-aconta-produits' avec chemin ${user_id}/${produit_id}.webp
+      // 2. D'ABORD uploader le vrai fichier dans le bucket 'efa-aconta-produits'
       if (newPhotoUrl) {
-        const uploaded = await uploadProductImage(newPhotoUrl, patron.id, prodId, userPlan);
-        if (uploaded) finalPhoto = uploaded;
+        try {
+          const uploaded = await uploadProductImage(newPhotoUrl, patron.id, prodId, userPlan);
+          if (uploaded) finalPhoto = uploaded;
+        } catch (uploadErr) {
+          console.error('[StockScreen] Échec upload image, création produit annulée:', uploadErr);
+          setIsSaving(false);
+          return; // NE PAS créer le produit si l'upload échoue !
+        }
       }
 
       const newProd: Produit = {

@@ -49,6 +49,8 @@ export interface Patron {
   type?: 'MAIN' | 'SUB'; // MAIN = boutique principale, SUB = sous-boutique
   maxBoutiques?: number; // max boutiques permises (default 3 pour Pro)
   ownerId?: string; // ID du patron propriétaire
+  isSubOfPro?: boolean; // Boutique 2 ou 3 rattachée à un compte PRO
+  subBadgeText?: string; // "PRO - Incluse dans Principale"
   created_at: string;
 }
 

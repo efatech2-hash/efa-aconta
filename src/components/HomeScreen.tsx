@@ -47,11 +47,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const currentPlan = patron.subscription_status || 'trial';
   const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
   const isPro = isProActive(patron);
+  const isSubOfPro = Boolean(patron.isSubOfPro || (isSubStore && isPro));
 
-  // MODIF 2: Bienvenue vendeur / vendeuse automatique selon le genre
+  // MODIF 2: Bienvenue patron / patronne automatique selon le genre
   const welcomePrefix = isPatron
-    ? (patron.genre === 'femme' ? 'Bienvenue patronne' : 'Bienvenu patron')
-    : (currentUser.genre === 'femme' ? 'Bienvenue vendeuse' : 'Bienvenu vendeur');
+    ? (patron.genre === 'homme' ? 'Bienvenue patron' : 'Bienvenue patronne')
+    : (currentUser.genre === 'homme' ? 'Bienvenue vendeur' : 'Bienvenue vendeuse');
 
   const referralCode = patron.referral_code || (patron as any).code_parrain || 'EFA-ACONTA';
   const referralLink = `https://efa-aconta.vercel.app?ref=${referralCode}`;
@@ -78,10 +79,17 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <div className="gold-tca-card rounded-3xl p-6 text-[#1E3A8A] shadow-2xl relative overflow-hidden ring-2 ring-amber-300 ring-offset-2">
         <div className="relative z-10">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-2.5">
-            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/40 border border-amber-600/30 text-xs font-black uppercase tracking-wider text-[#1E3A8A] w-fit">
-              <Sparkles className="w-4 h-4 text-[#1E3A8A] animate-spin" style={{ animationDuration: '4s' }} />
-              <span>{patron.nom_boutique || 'Ma Boutique'}</span>
-              <Sparkles className="w-3.5 h-3.5 text-amber-900 animate-pulse" />
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/40 border border-amber-600/30 text-xs font-black uppercase tracking-wider text-[#1E3A8A] w-fit">
+                <Sparkles className="w-4 h-4 text-[#1E3A8A] animate-spin" style={{ animationDuration: '4s' }} />
+                <span>{patron.nom_boutique || 'Ma Boutique'}</span>
+                <Sparkles className="w-3.5 h-3.5 text-amber-900 animate-pulse" />
+              </div>
+              {isSubOfPro && (
+                <span className="px-3 py-1 rounded-full bg-slate-900 text-amber-300 border border-amber-400/50 text-[11px] font-black uppercase shadow-xs">
+                  PRO - Incluse dans Principale
+                </span>
+              )}
             </div>
 
             {/* Scope = role='patron' UNIQUEMENT & Boutique Principale */}
@@ -335,8 +343,29 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </div>
           )}
 
-          {/* BANNIÈRE ESSAI 21 JOURS / ABONNEMENT (Uniquement sur boutique principale) */}
-          {!isSubStore && (
+          {/* BANNIÈRE ESSAI 21 JOURS / ABONNEMENT */}
+          {isSubOfPro ? (
+            <div className="p-4 sm:p-5 rounded-3xl bg-slate-900 text-white shadow-lg flex items-center justify-between gap-3 border border-amber-400/40">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center flex-shrink-0">
+                  <Crown className="w-6 h-6 text-amber-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-black text-base sm:text-lg text-amber-300">
+                      PRO - Incluse dans Principale
+                    </h4>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-black uppercase border border-emerald-400/40">
+                      Actif
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold text-slate-300 mt-0.5">
+                    Cette boutique est automatiquement rattachée à votre abonnement PRO principal.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : !isSubStore && (
             <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-blue-900 via-indigo-900 to-blue-950 text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border border-blue-400/30">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center flex-shrink-0">

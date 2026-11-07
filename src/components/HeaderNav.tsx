@@ -121,11 +121,12 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   const accord = getAccord(currentUser.genre);
   const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
   const isPro = isProActive(patron);
+  const isSubOfPro = Boolean(patron.isSubOfPro || (isSubStore && isPro));
 
-  // Bienvenue vendeur / vendeuse automatique selon le genre
+  // Bienvenue patron / patronne automatique selon le genre
   const welcomePrefix = currentUser.role === 'patron'
-    ? (currentUser.genre === 'femme' ? 'Bienvenue patronne' : 'Bienvenu patron')
-    : (currentUser.genre === 'femme' ? 'Bienvenue vendeuse' : 'Bienvenu vendeur');
+    ? ((currentUser.genre || patron.genre) === 'homme' ? 'Bienvenue patron' : 'Bienvenue patronne')
+    : (currentUser.genre === 'homme' ? 'Bienvenue vendeur' : 'Bienvenue vendeuse');
 
   return (
     <>
@@ -162,9 +163,16 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                 className="cursor-pointer min-w-0 flex-1 overflow-hidden"
                 onClick={() => onNavigate('home')}
               >
-                <h1 className="text-xs sm:text-sm md:text-base font-black text-gray-900 leading-tight truncate">
-                  {welcomePrefix} {currentUser.prenom || currentUser.nom} !
-                </h1>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <h1 className="text-xs sm:text-sm md:text-base font-black text-gray-900 leading-tight truncate">
+                    {welcomePrefix} {currentUser.prenom || currentUser.nom} !
+                  </h1>
+                  {isSubOfPro && (
+                    <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 border border-slate-300 text-[9px] sm:text-[10px] font-black uppercase shadow-2xs shrink-0">
+                      PRO - Incluse dans Principale
+                    </span>
+                  )}
+                </div>
                 <p className="text-[10px] sm:text-xs font-extrabold text-[#6C5CE7] truncate leading-tight mt-0.5">
                   {patron.nom_boutique || 'Ma Boutique'} • {accord.connecte}
                 </p>

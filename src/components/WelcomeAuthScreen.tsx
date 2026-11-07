@@ -19,6 +19,7 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
   // Formulaire Création
   const [createNomBoutique, setCreateNomBoutique] = useState('');
   const [createNomPatron, setCreateNomPatron] = useState('');
+  const [createGenre, setCreateGenre] = useState<'femme' | 'homme'>('femme');
   const [createWhatsapp, setCreateWhatsapp] = useState('');
   const [createPin, setCreatePin] = useState('');
   const [createConfirmPin, setCreateConfirmPin] = useState('');
@@ -76,6 +77,7 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
       const res = await createBoutique({
         nomBoutique: createNomBoutique.trim(),
         nomPatron: createNomPatron.trim(),
+        genre: createGenre,
         whatsappNumber: createWhatsapp.trim(),
         telephone: createWhatsapp.trim(),
         pin: createPin,
@@ -244,15 +246,47 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
 
             <div>
               <label className="block text-xs font-black text-gray-700 uppercase tracking-wide mb-1">
-                Ton prénom (Patron) :
+                Ton prénom ({createGenre === 'homme' ? 'Patron' : 'Patronne'}) :
               </label>
               <input
                 type="text"
-                placeholder="Ex : Aïcha, Koffi..."
+                placeholder={createGenre === 'homme' ? 'Ex : Koffi, Kodjo...' : 'Ex : Aïcha, Akou...'}
                 value={createNomPatron}
                 onChange={(e) => setCreateNomPatron(e.target.value)}
                 className="w-full p-4 rounded-2xl border-2 border-gray-200 text-base font-bold focus:border-[#6C5CE7] outline-none text-gray-900 bg-gray-50/50"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-black text-gray-700 uppercase tracking-wide mb-1">
+                Genre : *
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCreateGenre('homme')}
+                  className={`p-3.5 rounded-2xl border-2 font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer ${
+                    createGenre === 'homme'
+                      ? 'bg-blue-100 border-blue-600 text-blue-900 shadow-sm'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  <span className="text-xl">👨</span>
+                  <span>Homme (Patron)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateGenre('femme')}
+                  className={`p-3.5 rounded-2xl border-2 font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer ${
+                    createGenre === 'femme'
+                      ? 'bg-purple-100 border-[#6C5CE7] text-[#6C5CE7] shadow-sm'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  <span className="text-xl">👩</span>
+                  <span>Femme (Patronne)</span>
+                </button>
+              </div>
             </div>
 
             <div>

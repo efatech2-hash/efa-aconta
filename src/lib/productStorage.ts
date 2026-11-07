@@ -140,71 +140,94 @@ export async function ensureProductBucket(): Promise<void> {
 
 /**
  * Upload d'une image produit dans Supabase Storage :
- * - Compression obligatoire en WebP selon le plan via compressProductImage()
- * - Upload dans le bucket 'efa-aconta-produits'
- * - Chemin strict : `${user_id}/${produit_id}.webp`
- * - Renvoie l'URL publique de l'image
+ * - D'ABORD uploader le vrai fichier avec : supabase.storage.from('efa-aconta-produits').upload(`${boutiqueId}/prod-${Date.now()}.webp`, file)
+ * - Si l'upload échoue, afficher l'erreur avec alert() et lever une exception pour ne pas créer le produit
+ * - Ne jamais envoyer une string base64 ou une URL blob dans .upload(). Si la photo est en base64, convertir d'abord en vrai Blob / File.
+ * - ENSUITE seulement, récupérer le vrai lien avec getPublicUrl(). Ne pas construire l'URL à la main.
  */
 export async function uploadProductImage(
   imageSource: File | Blob | string,
-  userId: string,
-  produitId: string,
+  boutiqueId: string,
+  produitId?: string,
   plan: ProductPlan = 'gratuit'
 ): Promise<string> {
-  let fileToUpload: File;
+  let fileToUpload: File | Blob;
 
   if (typeof imageSource === 'string') {
-    if (imageSource.startsWith('data:') || imageSource.startsWith('blob:')) {
-      const res = await fetch(imageSource);
-      const blob = await res.blob();
-      fileToUpload = new File([blob], `${produitId}.jpg`, { type: blob.type || 'image/jpeg' });
-    } else {
-      // URL externe (ex: unsplash ou pollination), si déjà une URL distante
-      return imageSource;
-    }
-  } else if (imageSource instanceof File) {
-    fileToUpload = imageSource;
-  } else {
-    fileToUpload = new File([imageSource], `${produitId}.jpg`, { type: imageSource.type || 'image/jpeg' });
-  }
-
-  // 1. Compression obligatoire en WebP selon le plan
-  const compressedWebP = await compressProductImage(fileToUpload, plan);
-
-  // 2. Chemin strict demandé : `${user_id}/${produit_id}.webp`
-  const filePath = `${userId}/${produitId}.webp`;
-
-  // 3. Upload vers Supabase Storage bucket 'efa-aconta-produits'
-  try {
-    const { data, error } = await supabase.storage
-      .from(PRODUCT_STORAGE_BUCKET)
-      .upload(filePath, compressedWebP, {
-        contentType: 'image/webp',
-        upsert: true,
-      });
-
-    if (error) {
-      console.warn('[ProductStorage] Erreur upload Supabase storage, tentative createBucket:', error.message);
-      // Tentative de secours création bucket si erreur
-      await ensureProductBucket();
-      const retry = await supabase.storage
-        .from(PRODUCT_STORAGE_BUCKET)
-        .upload(filePath, compressedWebP, {
-          contentType: 'image/webp',
-          upsert: true,
-        });
-      if (retry.error) {
-        console.warn('[ProductStorage] Deuxième tentative échouée:', retry.error.message);
+    // Si c'est déjà une URL externe HTTP (ex: Unsplash) et pas un blob/data URL
+    if (imageSource.startsWith('http://') || imageSource.startsWith('https://')) {
+      if (!imageSource.includes('efa-aconta-produits')) {
+        return imageSource;
       }
     }
 
-    const { data: pubData } = supabase.storage
-      .from(PRODUCT_STORAGE_BUCKET)
-      .getPublicUrl(filePath);
-
-    return pubData?.publicUrl || '';
-  } catch (uploadErr) {
-    console.warn('[ProductStorage] Erreur réseau lors de l\'upload:', uploadErr);
-    return '';
+    if (imageSource.startsWith('blob:')) {
+      const res = await fetch(imageSource);
+      fileToUpload = await res.blob();
+    } else {
+      // Conversion base64 en vrai Blob
+      try {
+        let b64 = imageSource;
+        let mime = 'image/jpeg';
+        if (imageSource.includes(',')) {
+          const parts = imageSource.split(',');
+          const mimeMatch = parts[0].match(/:(.*?);/);
+          if (mimeMatch) mime = mimeMatch[1];
+          b64 = parts[1];
+        }
+        const binary = atob(b64);
+        const array = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          array[i] = binary.charCodeAt(i);
+        }
+        fileToUpload = new Blob([array], { type: mime });
+      } catch (err) {
+        const res = await fetch(imageSource);
+        fileToUpload = await res.blob();
+      }
+    }
+  } else {
+    fileToUpload = imageSource;
   }
+
+  // 1. Compression WebP
+  let finalFile: File | Blob;
+  try {
+    const rawFile = fileToUpload instanceof File
+      ? fileToUpload
+      : new File([fileToUpload], `prod-${Date.now()}.jpg`, { type: fileToUpload.type || 'image/jpeg' });
+    finalFile = await compressProductImage(rawFile, plan);
+  } catch (compErr) {
+    console.warn('[ProductStorage] Compression WebP échouée, utilisation du fichier original:', compErr);
+    finalFile = fileToUpload;
+  }
+
+  // 2. Chemin strict demandé : `${boutiqueId}/prod-${Date.now()}.webp`
+  const filePath = `${boutiqueId}/prod-${Date.now()}.webp`;
+
+  // 3. D'ABORD uploader le vrai fichier dans le Storage
+  const { data, error } = await supabase.storage
+    .from(PRODUCT_STORAGE_BUCKET)
+    .upload(filePath, finalFile, {
+      contentType: 'image/webp',
+      upsert: true,
+    });
+
+  if (error) {
+    console.error('[ProductStorage] Échec upload Supabase Storage:', error);
+    alert(`Erreur upload photo : ${error.message || 'Impossible d\'enregistrer l\'image'}`);
+    throw new Error(`Upload image échoué: ${error.message}`);
+  }
+
+  // 4. ENSUITE seulement, récupérer le vrai lien avec getPublicUrl()
+  const { data: pubData } = supabase.storage
+    .from(PRODUCT_STORAGE_BUCKET)
+    .getPublicUrl(filePath);
+
+  if (!pubData?.publicUrl) {
+    alert("Erreur: Impossible de récupérer le lien public de l'image");
+    throw new Error("Lien public de l'image introuvable");
+  }
+
+  return pubData.publicUrl;
 }

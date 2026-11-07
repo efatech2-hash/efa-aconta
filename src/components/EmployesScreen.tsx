@@ -125,10 +125,8 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
       try {
         const query = supabase
           .from('employes')
-          .select('id, nom, code_pin, role, telephone, phone_country, phone_number, phone_full, photo_url, status, is_active, genre, pin_hash, created_at')
-          .eq('patron_id', patron.id)
-          .order('created_at', { ascending: false })
-          .limit(20);
+          .select('*')
+          .order('created_at', { ascending: false });
 
         const { data, error }: any = await withTimeout(query, 5000);
 
