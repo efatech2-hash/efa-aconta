@@ -522,60 +522,66 @@ export default function App() {
               }
             }
 
-            // B. Rechargement complet des produits UNIQUEMENT depuis Supabase
-            const { data: remoteProds } = await supabase
+            // B. Rechargement complet des produits UNIQUEMENT depuis Supabase pour cette boutique
+            const { data: remoteProds, error: prodErr } = await supabase
               .from('produits')
               .select('*')
+              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`)
               .order('created_at', { ascending: false });
 
-            if (remoteProds && remoteProds.length > 0) {
-              const matchingProds = remoteProds.filter((p: any) => !p.patron_id || p.patron_id === currentPatron.id);
-              const prodsToStore = matchingProds.length > 0 ? matchingProds : remoteProds;
-              await db.produits.bulkPut(
-                prodsToStore.map((p) => ({
-                  id: p.id,
-                  patron_id: p.patron_id || currentPatron.id,
-                  nom: p.nom,
-                  prix_achat: Number(p.prix_achat) || 0,
-                  prix_vente: Number(p.prix_vente) || 0,
-                  stock_qte: Number(p.stock_qte) || 0,
-                  seuil_alerte: Number(p.seuil_alerte) ?? 5,
-                  categorie: p.categorie || 'Général',
-                  photo_url: p.photo_url || '',
-                  created_at: p.created_at || new Date().toISOString(),
-                }))
-              );
+            if (!prodErr && remoteProds) {
+              await db.produits.where('patron_id').equals(currentPatron.id).delete();
+              if (remoteProds.length > 0) {
+                await db.produits.bulkPut(
+                  remoteProds.map((p) => ({
+                    id: p.id,
+                    boutique_id: currentPatron.id,
+                    patron_id: currentPatron.id,
+                    nom: p.nom,
+                    prix_achat: Number(p.prix_achat) || 0,
+                    prix_vente: Number(p.prix_vente) || 0,
+                    stock_qte: Number(p.stock_qte) || 0,
+                    seuil_alerte: Number(p.seuil_alerte) ?? 5,
+                    categorie: p.categorie || 'Général',
+                    photo_url: p.photo_url || '',
+                    created_at: p.created_at || new Date().toISOString(),
+                  }))
+                );
+              }
             }
 
-            // C. Rechargement des employés UNIQUEMENT depuis Supabase
-            const { data: remoteEmps } = await supabase
+            // C. Rechargement des employés UNIQUEMENT depuis Supabase pour cette boutique
+            const { data: remoteEmps, error: empErr } = await supabase
               .from('employes')
               .select('*')
+              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`)
               .order('created_at', { ascending: false });
-            if (remoteEmps && remoteEmps.length > 0) {
-              const matchingEmps = remoteEmps.filter((e: any) => !e.patron_id || e.patron_id === currentPatron.id);
-              const empsToStore = matchingEmps.length > 0 ? matchingEmps : remoteEmps;
-              await db.employes.bulkPut(
-                empsToStore.map((e) => ({
-                  id: e.id,
-                  patron_id: e.patron_id || currentPatron.id,
-                  nom: e.nom,
-                  role: (e.role as any) || 'vendeuse',
-                  telephone: e.telephone || '',
-                  phone_country: e.phone_country || '+228',
-                  phone_number: e.phone_number || '',
-                  phone_full: e.phone_full || e.telephone || '',
-                  pin_hash: e.pin_hash || '',
-                  pin_code: e.code_pin || e.pin_code || '',
-                  code_pin: e.code_pin || e.pin_code || '',
-                  status: e.status || 'active',
-                  is_active: e.is_active !== false,
-                  genre: e.genre || 'femme',
-                  photo_url: e.photo_url,
-                  subscription_status: currentPatron.subscription_status || 'trial',
-                  created_at: e.created_at || new Date().toISOString(),
-                }))
-              );
+            if (!empErr && remoteEmps) {
+              await db.employes.where('patron_id').equals(currentPatron.id).delete();
+              if (remoteEmps.length > 0) {
+                await db.employes.bulkPut(
+                  remoteEmps.map((e) => ({
+                    id: e.id,
+                    boutique_id: currentPatron.id,
+                    patron_id: currentPatron.id,
+                    nom: e.nom,
+                    role: (e.role as any) || 'vendeuse',
+                    telephone: e.telephone || '',
+                    phone_country: e.phone_country || '+228',
+                    phone_number: e.phone_number || '',
+                    phone_full: e.phone_full || e.telephone || '',
+                    pin_hash: e.pin_hash || '',
+                    pin_code: e.code_pin || e.pin_code || '',
+                    code_pin: e.code_pin || e.pin_code || '',
+                    status: e.status || 'active',
+                    is_active: e.is_active !== false,
+                    genre: e.genre || 'femme',
+                    photo_url: e.photo_url,
+                    subscription_status: currentPatron.subscription_status || 'trial',
+                    created_at: e.created_at || new Date().toISOString(),
+                  }))
+                );
+              }
             }
 
             // D. Rechargement des ventes depuis Supabase
@@ -667,7 +673,7 @@ export default function App() {
         }
 
         // Filtrage strict par currentPatron.id (boutique_id)
-        let [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
+        const [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
           db.employes.where('patron_id').equals(currentPatron.id).toArray(),
           db.produits.where('patron_id').equals(currentPatron.id).toArray(),
           db.ventes.where('patron_id').equals(currentPatron.id).toArray(),
@@ -675,12 +681,6 @@ export default function App() {
           db.credits.where('patron_id').equals(currentPatron.id).toArray(),
           db.parrainage.where('parrain_id').equals(currentPatron.id).toArray(),
         ]);
-        if (prodList.length === 0) {
-          prodList = await db.produits.toArray();
-        }
-        if (empList.length === 0) {
-          empList = await db.employes.toArray();
-        }
         setEmployes(empList);
         setProducts(prodList);
         setVentes(ventList);
@@ -1100,6 +1100,9 @@ export default function App() {
                 if (targetStore) {
                   setDeviceStore(targetStore.id, targetStore.nom_boutique);
                   setDeviceStoreInfo(getDeviceStoreInfo());
+                  localStorage.setItem('currentBoutiqueId', targetStore.id);
+                  setProducts([]);
+                  setEmployes([]);
                   loadDatabase();
                   setActiveTab('home');
                 }
@@ -1146,6 +1149,9 @@ export default function App() {
             onSelectStore={(selected) => {
               setDeviceStore(selected.id, selected.nom_boutique);
               setDeviceStoreInfo(getDeviceStoreInfo());
+              localStorage.setItem('currentBoutiqueId', selected.id);
+              setProducts([]);
+              setEmployes([]);
               setIsDeviceSelectModalOpen(false);
               loadDatabase();
             }}

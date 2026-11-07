@@ -19,6 +19,7 @@ import { queueSyncItem } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
 import { logAction } from '../lib/historique';
 import { canAddArticle, getArticleLimitInfo } from '../lib/checkLimits';
+import { isPatronGloballyPro, getTotalArticleCount, getMainStoreId } from '../lib/mesBoutiques';
 import { checkProductQuota, uploadProductImage } from '../lib/productStorage';
 import { normalizePlanForCompression, type ProductPlan } from '../lib/productCompressor';
 import { supabase } from '../lib/supabase';
@@ -178,16 +179,28 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
       return;
     }
 
-    // GARDE-FOU STRICT : Vérification quota articles avant upload (7 en gratuit, 100 en payant, 300 en pro)
+    // GARDE-FOU STRICT : Quota PRO (300 articles partagés) vs Essai (7) / Populaire (100)
+    const mainStoreId = getMainStoreId(patron);
+    const isPro = await isPatronGloballyPro(patron);
     const userPlan = normalizePlanForCompression(patron.subscription_status);
-    const quotaCheck = await checkProductQuota(patron.id, userPlan);
-    if (!quotaCheck.allowed) {
-      setFeedback(quotaCheck.message || 'Limite de produits atteinte.');
-      speakFrench(quotaCheck.message || 'Limite atteinte');
-      if (onOpenSubscriptionModal) {
-        onOpenSubscriptionModal(userPlan === 'gratuit' ? 'populaire' : 'pro', quotaCheck.message);
+    if (isPro) {
+      const totalArticles = await getTotalArticleCount(mainStoreId);
+      if (totalArticles >= 300) {
+        const msg = "Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies.";
+        setFeedback(msg);
+        speakFrench(msg);
+        return;
       }
-      return;
+    } else {
+      const quotaCheck = await checkProductQuota(patron.id, userPlan);
+      if (!quotaCheck.allowed) {
+        setFeedback(quotaCheck.message || 'Limite de produits atteinte.');
+        speakFrench(quotaCheck.message || 'Limite atteinte');
+        if (onOpenSubscriptionModal) {
+          onOpenSubscriptionModal(userPlan === 'gratuit' ? 'populaire' : 'pro', quotaCheck.message);
+        }
+        return;
+      }
     }
 
     setIsLoading(true);
@@ -210,6 +223,7 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
 
     const newProduit: Produit = {
       id: prodId,
+      boutique_id: patron.id,
       patron_id: patron.id,
       nom: nom.trim(),
       photo_url: finalPhotoUrl,
@@ -225,7 +239,8 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         const { error: insertErr } = await supabase.from('produits').insert([{
           id: prodId,
-          patron_id: patron.id,
+          boutique_id: patron.id,
+          patron_id: mainStoreId || patron.id,
           nom: newProduit.nom,
           prix_vente: newProduit.prix_vente,
           prix_achat: newProduit.prix_achat,

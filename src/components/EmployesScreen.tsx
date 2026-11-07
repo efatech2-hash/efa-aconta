@@ -39,6 +39,7 @@ import { logAction } from '../lib/historique';
 import { canAddEmploye, canAddVendeur, getVendeurLimitInfo, PLAN_CONFIGS } from '../lib/checkLimits';
 import {
   isProActive,
+  isPatronGloballyPro,
   getMainStoreId,
   getTotalEmployeeCount,
   canAddEmployeePro,
@@ -75,17 +76,20 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
   const [feedback, setFeedback] = useState<string | null>(null);
 
   // LOGIQUE DES 10 EMPLOYÉS PARTAGÉS (PRO)
-  const isPro = isProActive(patron);
   const mainStoreId = getMainStoreId(patron);
+  const [isPro, setIsPro] = useState<boolean>(isProActive(patron));
   const [totalEmployesPro, setTotalEmployesPro] = useState<number>(employes.length);
 
   useEffect(() => {
-    if (isPro) {
-      getTotalEmployeeCount(mainStoreId).then(setTotalEmployesPro);
-    } else {
-      setTotalEmployesPro(employes.length);
-    }
-  }, [patron, employes, isPro, mainStoreId]);
+    isPatronGloballyPro(patron).then((proActive) => {
+      setIsPro(proActive);
+      if (proActive) {
+        getTotalEmployeeCount(mainStoreId).then(setTotalEmployesPro);
+      } else {
+        setTotalEmployesPro(employes.length);
+      }
+    });
+  }, [patron, employes, mainStoreId]);
 
   // Restauration automatique du formulaire si déchargé par Android
   useEffect(() => {
@@ -116,7 +120,7 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
   const isFetchingEmployesRef = useRef(false);
   const hasFetchedEmployesRef = useRef(false);
 
-  // Récupérer les employés depuis Supabase avec timeout 5s, limit 20, tri et guard anti-boucle
+  // Récupérer les employés depuis Supabase filtrés strictement par boutique_id
   useEffect(() => {
     async function fetchEmployesFromSupabase() {
       if (isFetchingEmployesRef.current || hasFetchedEmployesRef.current) return;
@@ -126,15 +130,17 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
         const query = supabase
           .from('employes')
           .select('*')
+          .or(`boutique_id.eq.${patron.id},and(boutique_id.is.null,patron_id.eq.${patron.id})`)
           .order('created_at', { ascending: false });
 
         const { data, error }: any = await withTimeout(query, 5000);
 
-        if (!error && data && data.length > 0) {
-          let hasNew = false;
+        if (!error && data) {
+          await db.employes.where('patron_id').equals(patron.id).delete();
           for (const emp of data) {
             const mappedEmp: Employe = {
               id: emp.id,
+              boutique_id: patron.id,
               patron_id: patron.id,
               nom: emp.nom,
               role: (emp.role as any) || 'vendeuse',
@@ -147,16 +153,13 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
               is_active: emp.is_active,
               genre: (emp.genre as any) || 'femme',
               pin_hash: emp.pin_hash || '',
-              pin_code: emp.code_pin,
-              code_pin: emp.code_pin,
+              pin_code: emp.code_pin || emp.pin_code,
+              code_pin: emp.code_pin || emp.pin_code,
               created_at: emp.created_at || new Date().toISOString(),
             };
             await db.employes.put(mappedEmp);
-            hasNew = true;
           }
-          if (hasNew) {
-            onRefresh();
-          }
+          onRefresh();
         }
         hasFetchedEmployesRef.current = true;
       } catch (err) {
@@ -227,10 +230,11 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
   const handleAddEmploye = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // RÈGLE PRO : max 10 employés toutes boutiques réunies
+    // RÈGLE PRO : max 10 employés toutes boutiques réunies si PRO, sinon quota normal
+    const isPro = await isPatronGloballyPro(patron);
     if (isPro) {
-      const check = await canAddEmployeePro(mainStoreId);
-      if (!check.allowed) {
+      const totalEmp = await getTotalEmployeeCount(mainStoreId);
+      if (totalEmp >= 10) {
         setFeedback("Limite Pro atteinte : 10 employés pour toutes tes boutiques réunies.");
         alert("Limite Pro atteinte : 10 employés pour toutes tes boutiques réunies.");
         return;
@@ -284,6 +288,7 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
 
       const newEmploye: Employe = {
         id: empId,
+        boutique_id: patron.id,
         patron_id: patron.id,
         nom: nom.trim(),
         telephone: `${phoneCountry} ${cleanDigits}`,
@@ -306,7 +311,8 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         const { error: empErr } = await supabase.from('employes').insert([{
           id: empId,
-          patron_id: patron.id,
+          boutique_id: patron.id,
+          patron_id: mainStoreId || patron.id,
           nom: newEmploye.nom,
           telephone: newEmploye.telephone,
           phone_country: newEmploye.phone_country,

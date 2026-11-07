@@ -66,6 +66,7 @@ export interface ReferralLogRecord {
 
 export interface Employe {
   id: string;
+  boutique_id?: string; // ID de la boutique active à laquelle appartient l'employé
   patron_id: string;
   nom: string;
   prenom?: string;
@@ -89,6 +90,7 @@ export interface Employe {
 
 export interface Produit {
   id: string;
+  boutique_id?: string; // ID de la boutique active à laquelle appartient l'article
   patron_id: string;
   nom: string;
   photo_url: string;

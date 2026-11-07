@@ -471,4 +471,12 @@ CREATE POLICY "allow_all_employes" ON public.employes
     USING (true)
     WITH CHECK (true);
 
+-- ==============================================================================
+-- 3. AJOUT COLONNE BOUTIQUE_ID (ISOLATION MULTI-BOUTIQUES)
+-- ==============================================================================
+ALTER TABLE IF EXISTS public.produits ADD COLUMN IF NOT EXISTS boutique_id TEXT;
+ALTER TABLE IF EXISTS public.employes ADD COLUMN IF NOT EXISTS boutique_id TEXT;
+UPDATE public.produits SET boutique_id = patron_id WHERE boutique_id IS NULL;
+UPDATE public.employes SET boutique_id = patron_id WHERE boutique_id IS NULL;
+
 

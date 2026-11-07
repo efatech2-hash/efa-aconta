@@ -23,11 +23,48 @@ export function isProActive(patron?: Patron | null): boolean {
 
   return (
     patron.isProActive === true ||
+    patron.isSubOfPro === true ||
     plan === 'pro' ||
     plan.includes('pro') ||
     forfait.includes('pro') ||
     statut.includes('pro')
   );
+}
+
+/**
+ * Vérifie si le patron ou l'une de ses boutiques est PRO (50.000 F 6 mois ou 90.000 F 1 an)
+ * Règle d'or : si une boutique du patron est PRO, TOUTES ses boutiques sont PRO.
+ */
+export async function isPatronGloballyPro(patron?: Patron | null): Promise<boolean> {
+  if (!patron) return false;
+  if (isProActive(patron)) return true;
+
+  try {
+    const mainStoreId = getMainStoreId(patron);
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const orFilter = `id.eq.${mainStoreId},patron_id.eq.${mainStoreId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`;
+      const { data: btqs } = await supabase
+        .from('boutiques')
+        .select('id, plan, status, last_payment_amount')
+        .or(orFilter);
+
+      if (btqs && btqs.length > 0) {
+        const found = btqs.some((b) => {
+          const p = (b.plan || '').toLowerCase();
+          const amt = Number(b.last_payment_amount) || 0;
+          return p === 'pro' || p.includes('pro') || amt >= 50000;
+        });
+        if (found) {
+          patron.isProActive = true;
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[isPatronGloballyPro] Erreur:', err);
+  }
+
+  return false;
 }
 
 /**
@@ -100,10 +137,24 @@ export async function getOwnerStores(ownerOrAnyStoreId: string): Promise<Patron[
 export async function getTotalArticleCount(ownerOrMainStoreId: string): Promise<number> {
   try {
     const stores = await getOwnerStores(ownerOrMainStoreId);
-    const storeIds = stores.length > 0 ? stores.map((s) => s.id) : [ownerOrMainStoreId];
+    const storeIds = Array.from(new Set([ownerOrMainStoreId, ...stores.map((s) => s.id)]));
+
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const orClause = `patron_id.eq.${ownerOrMainStoreId},${storeIds.map((id) => `boutique_id.eq.${id}`).join(',')}`;
+      const { count, error } = await supabase
+        .from('produits')
+        .select('id', { count: 'exact', head: true })
+        .or(orClause);
+
+      if (!error && count !== null) {
+        return count;
+      }
+    }
 
     const allProducts = await db.produits.toArray();
-    const count = allProducts.filter((p) => storeIds.includes(p.patron_id)).length;
+    const count = allProducts.filter((p) =>
+      storeIds.includes(p.boutique_id || '') || storeIds.includes(p.patron_id)
+    ).length;
     return count;
   } catch (err) {
     console.warn('[MesBoutiques] Erreur count articles:', err);
@@ -136,11 +187,23 @@ export async function canAddArticlePro(
 export async function getTotalEmployeeCount(ownerOrMainStoreId: string): Promise<number> {
   try {
     const stores = await getOwnerStores(ownerOrMainStoreId);
-    const storeIds = stores.length > 0 ? stores.map((s) => s.id) : [ownerOrMainStoreId];
+    const storeIds = Array.from(new Set([ownerOrMainStoreId, ...stores.map((s) => s.id)]));
+
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const orClause = `patron_id.eq.${ownerOrMainStoreId},${storeIds.map((id) => `boutique_id.eq.${id}`).join(',')}`;
+      const { count, error } = await supabase
+        .from('employes')
+        .select('id', { count: 'exact', head: true })
+        .or(orClause);
+
+      if (!error && count !== null) {
+        return count;
+      }
+    }
 
     const allEmployes = await db.employes.toArray();
     const count = allEmployes.filter(
-      (e) => storeIds.includes(e.patron_id) && e.status !== 'deleted' && !e.is_deleted
+      (e) => (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id)) && e.status !== 'deleted' && !e.is_deleted
     ).length;
     return count;
   } catch (err) {

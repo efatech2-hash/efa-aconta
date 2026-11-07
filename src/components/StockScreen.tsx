@@ -26,6 +26,7 @@ import { logAction } from '../lib/historique';
 import { canAddArticle, getArticleLimitInfo } from '../lib/checkLimits';
 import {
   isProActive,
+  isPatronGloballyPro,
   getMainStoreId,
   getTotalArticleCount,
   canAddArticlePro,
@@ -99,28 +100,33 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const quotaPercent = Math.min(100, Math.round((currentTotalArticles / maxArticlesPlan) * 100));
 
   React.useEffect(() => {
-    if (isPro) {
-      getTotalArticleCount(mainStoreId).then((cnt) => {
-        setTotalArticlesPro(cnt);
-      });
-    } else {
-      setTotalArticlesPro(products.length);
-    }
-  }, [patron, products, isPro, mainStoreId]);
+    isPatronGloballyPro(patron).then((isPro) => {
+      if (isPro) {
+        getTotalArticleCount(mainStoreId).then((cnt) => {
+          setTotalArticlesPro(cnt);
+        });
+      } else {
+        setTotalArticlesPro(products.length);
+      }
+    });
+  }, [patron, products, mainStoreId]);
 
-  // Bug 2: Chargement direct des produits depuis Supabase au montage de la vitrine / liste
+  // Chargement direct des produits depuis Supabase pour cette boutique
   React.useEffect(() => {
     async function loadFreshProductsFromSupabase() {
       try {
         const { data, error } = await supabase
           .from('produits')
           .select('*')
+          .or(`boutique_id.eq.${patron.id},and(boutique_id.is.null,patron_id.eq.${patron.id})`)
           .order('created_at', { ascending: false });
 
-        if (!error && data && data.length > 0) {
+        if (!error && data) {
+          await db.produits.where('patron_id').equals(patron.id).delete();
           const fresh = data.map((p) => ({
             id: p.id,
-            patron_id: p.patron_id || patron.id,
+            boutique_id: patron.id,
+            patron_id: patron.id,
             nom: p.nom,
             prix_achat: Number(p.prix_achat) || 0,
             prix_vente: Number(p.prix_vente) || 0,
@@ -130,7 +136,9 @@ export const StockScreen: React.FC<StockScreenProps> = ({
             photo_url: p.photo_url || '',
             created_at: p.created_at || new Date().toISOString(),
           }));
-          await db.produits.bulkPut(fresh);
+          if (fresh.length > 0) {
+            await db.produits.bulkPut(fresh);
+          }
           onRefresh();
         }
       } catch (err) {
@@ -373,22 +381,22 @@ export const StockScreen: React.FC<StockScreenProps> = ({
     e.preventDefault();
     if (!newNom.trim()) return;
 
-    // 1. VÉRIFICATION STRICTE QUOTA AVANT UPLOAD
+    // 1. Quota check PRO (300 articles partagés) vs Essai/Populaire
+    const isPro = await isPatronGloballyPro(patron);
     const userPlan = normalizePlanForCompression(patron.subscription_status);
-    const quotaCheck = await checkProductQuota(patron.id, userPlan);
-    if (!quotaCheck.allowed) {
-      alert(quotaCheck.message || 'Limite de produits atteinte.');
-      if (onOpenSubscriptionModal) {
-        onOpenSubscriptionModal(userPlan === 'gratuit' ? 'populaire' : 'pro', quotaCheck.message);
-      }
-      return;
-    }
-
-    // RÈGLE D'OR : totalArticlesToutesBoutiques <= 300 pour Pro
     if (isPro) {
-      const check = await canAddArticlePro(mainStoreId);
-      if (!check.allowed) {
+      const totalArticles = await getTotalArticleCount(mainStoreId);
+      if (totalArticles >= 300) {
         alert("Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.");
+        return;
+      }
+    } else {
+      const quotaCheck = await checkProductQuota(patron.id, userPlan);
+      if (!quotaCheck.allowed) {
+        alert(quotaCheck.message || 'Limite de produits atteinte.');
+        if (onOpenSubscriptionModal) {
+          onOpenSubscriptionModal(userPlan === 'gratuit' ? 'populaire' : 'pro', quotaCheck.message);
+        }
         return;
       }
     }
@@ -421,6 +429,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
 
       const newProd: Produit = {
         id: prodId,
+        boutique_id: patron.id,
         patron_id: patron.id,
         nom: newNom.trim(),
         categorie: newCategorie.trim() || 'Général',
@@ -436,7 +445,8 @@ export const StockScreen: React.FC<StockScreenProps> = ({
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         const { error: insertErr } = await supabase.from('produits').insert([{
           id: prodId,
-          patron_id: patron.id,
+          boutique_id: patron.id,
+          patron_id: mainStoreId || patron.id,
           nom: newProd.nom,
           categorie: newProd.categorie,
           prix_vente: newProd.prix_vente,
