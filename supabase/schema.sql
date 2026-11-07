@@ -402,3 +402,73 @@ CREATE POLICY "Allow anon and auth all referrals" ON public.referrals
     USING (true)
     WITH CHECK (true);
 
+-- ==============================================================================
+-- 1. BUCKET STORAGE 'efa-aconta-produits' PUBLIC + RLS POLICIES PERMISSIVES
+-- ==============================================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+    'efa-aconta-produits',
+    'efa-aconta-produits',
+    true,
+    5242880,
+    ARRAY['image/webp', 'image/jpeg', 'image/png', 'image/jpg']
+)
+ON CONFLICT (id) DO UPDATE SET
+    public = true,
+    file_size_limit = 5242880,
+    allowed_mime_types = ARRAY['image/webp', 'image/jpeg', 'image/png', 'image/jpg'];
+
+-- Suppression des anciennes policies susceptibles de bloquer sur le bucket
+DROP POLICY IF EXISTS "efa_aconta_produits_select" ON storage.objects;
+DROP POLICY IF EXISTS "efa_aconta_produits_insert" ON storage.objects;
+DROP POLICY IF EXISTS "efa_aconta_produits_update" ON storage.objects;
+DROP POLICY IF EXISTS "efa_aconta_produits_delete" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public read efa-aconta-produits" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public insert efa-aconta-produits" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public uploads efa-aconta-produits" ON storage.objects;
+DROP POLICY IF EXISTS "Allow all for efa-aconta-produits" ON storage.objects;
+DROP POLICY IF EXISTS "public read" ON storage.objects;
+DROP POLICY IF EXISTS "public insert" ON storage.objects;
+
+-- 4 Policies permissives pour storage.objects sur 'efa-aconta-produits' (anon + authenticated)
+CREATE POLICY "efa_aconta_produits_select"
+ON storage.objects FOR SELECT
+TO public, anon, authenticated
+USING (bucket_id = 'efa-aconta-produits');
+
+CREATE POLICY "efa_aconta_produits_insert"
+ON storage.objects FOR INSERT
+TO public, anon, authenticated
+WITH CHECK (bucket_id = 'efa-aconta-produits');
+
+CREATE POLICY "efa_aconta_produits_update"
+ON storage.objects FOR UPDATE
+TO public, anon, authenticated
+USING (bucket_id = 'efa-aconta-produits')
+WITH CHECK (bucket_id = 'efa-aconta-produits');
+
+CREATE POLICY "efa_aconta_produits_delete"
+ON storage.objects FOR DELETE
+TO public, anon, authenticated
+USING (bucket_id = 'efa-aconta-produits');
+
+-- ==============================================================================
+-- 2. POLICIES PERMISSIVES POUR TABLES PRODUITS & EMPLOYES
+-- ==============================================================================
+ALTER TABLE IF EXISTS public.produits ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow all produits" ON public.produits;
+DROP POLICY IF EXISTS "allow_all_produits" ON public.produits;
+CREATE POLICY "allow_all_produits" ON public.produits
+    FOR ALL TO anon, authenticated
+    USING (true)
+    WITH CHECK (true);
+
+ALTER TABLE IF EXISTS public.employes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow all employes" ON public.employes;
+DROP POLICY IF EXISTS "allow_all_employes" ON public.employes;
+CREATE POLICY "allow_all_employes" ON public.employes
+    FOR ALL TO anon, authenticated
+    USING (true)
+    WITH CHECK (true);
+
+
