@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/* MODIF 2: Placeholders gris clair peu visibles dans toute l'application */
+::placeholder {
+  color: #9CA3AF !important; /* gray-400 */
+  opacity: 0.6 !important;
+  font-weight: 400;
+}
+input::placeholder, textarea::placeholder {
+  color: #9CA3AF !important;
+  opacity: 0.6 !important;
+}
+
+@keyframes goldShimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.gold-tca-card {
+  background: linear-gradient(90deg, #FFD700, #FFC300, #FFA500, #FFD700);
+  background-size: 200% 100%;
+  animation: goldShimmer 3s infinite linear;
+  box-shadow: 0 4px 15px rgba(255, 215, 0, 0.4);
+}
+
+@media (max-width: 768px) {
+  .btn {
+    width: 100%;
+    min-height: 44px;
+    font-size: 14px;
+  }
+}
+
+/* FIX RESPONSIVE MOBILE EFA ACONTA: Boutons Déconnexion + Paramètres (375px - 768px) */
+@media (min-width: 375px) and (max-width: 768px) {
+  .header-mobile-container {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 40 !important;
+    width: 100% !important;
+  }
+
+  .header-title-mobile {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-btn-mobile {
+    min-height: 44px !important;
+    min-width: 40px !important;
+    touch-action: manipulation !important;
+    -webkit-tap-highlight-color: transparent !important;
+    cursor: pointer !important;
+    pointer-events: auto !important;
+  }
+
+  .mobile-nav-drawer {
+    z-index: 100 !important;
+    pointer-events: auto !important;
+  }
+}
+
+@media (max-width: 374px) {
+  .header-title-mobile {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* CORRECTION 3 : Boutons réactifs sur mobile & Touch-action */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  touch-action: manipulation;
+  min-height: 44px;
+  min-width: 44px;
+}
+

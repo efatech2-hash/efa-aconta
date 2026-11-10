@@ -1,0 +1,6 @@
+{
+  "name": "EFA ACONTA V5 - Caisse Vocale & Tactile Togo",
+  "description": "Application de caisse et comptabilité vocale et tactile ultra-simple pour commerçantes du marché de Lomé (Deckon, Togo). 100% PWA Offline-first.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
