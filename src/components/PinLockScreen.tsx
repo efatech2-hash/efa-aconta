@@ -273,7 +273,7 @@ export const PinLockScreen: React.FC<PinLockScreenProps> = ({
             <img
               src="/logo.png"
               alt="EFA ACONTA"
-              className="h-8 sm:h-9 w-auto rounded-xl object-contain drop-shadow-lg shadow-black/20 group-hover:scale-105 transition"
+              className="h-8 sm:h-9 w-auto rounded-full object-contain drop-shadow-lg shadow-black/20 group-hover:scale-105 transition"
               onError={(e) => {
                 e.currentTarget.onerror = null;
                 e.currentTarget.src = '/logo-efa.png';

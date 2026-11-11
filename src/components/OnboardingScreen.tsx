@@ -219,6 +219,11 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
       <div className="w-full max-w-lg bg-white rounded-3xl p-6 sm:p-8 shadow-2xl border-2 border-gray-100">
         {/* Brand header */}
         <div className="text-center mb-6">
+          <img
+            src="/logo.png"
+            alt="EFA ACONTA"
+            className="w-16 h-16 rounded-full mx-auto mb-3 object-contain drop-shadow-md"
+          />
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[#6C5CE7]/10 text-[#6C5CE7] font-black text-sm mb-2">
             GESTION COMMERCE VOCALE & TACTILE
           </div>

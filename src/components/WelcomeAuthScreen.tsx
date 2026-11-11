@@ -149,9 +149,11 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
       <div className="w-full max-w-md bg-white rounded-3xl p-6 sm:p-8 shadow-xl border-2 border-gray-100 space-y-6">
         {/* LOGO & TITRE */}
         <div className="text-center space-y-2">
-          <div className="w-20 h-20 bg-[#6C5CE7] rounded-3xl mx-auto flex items-center justify-center text-white text-3xl font-black shadow-lg shadow-[#6C5CE7]/30 transform active:scale-95 transition">
-            EFA
-          </div>
+          <img
+            src="/logo.png"
+            alt="EFA ACONTA"
+            className="w-20 h-20 rounded-full mx-auto object-contain drop-shadow-xl transform active:scale-95 transition"
+          />
           <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight leading-tight">
             EFA ACONTA
           </h1>
