@@ -47,7 +47,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { withTimeout } from './lib/supabaseHelper';
 import CheckAbonnement from './components/CheckAbonnement';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
-import { getCurrentBoutiqueId, boutiqueToPatron } from './lib/deviceAuth';
+import { getCurrentBoutiqueId, getActiveBoutiqueId, boutiqueToPatron } from './lib/deviceAuth';
 import { SuperAdminScreen } from './components/SuperAdminScreen';
 import EfaAdmin from './pages/EfaAdmin';
 import { MonAbonnementModal } from './components/MonAbonnementModal';
@@ -364,17 +364,50 @@ export default function App() {
       // 3. Synchronisation distante si en ligne
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         try {
-          // Synchronisation distante depuis la table boutiques
+          // RÈGLE : Ne vérifie JAMAIS subscription_status dans patrons, elle est toujours à trial.
+          // Le vrai PRO est dans boutiques : plan (pro, pro_annuel, populaire) + status = active + subscription_end_date.
+          // Quand on se connecte, lis boutiques WHERE id = boutique active, si plan != trial et status = active, affiche PRO.
+          let bDataRecord: any = null;
+
           const { data: bData } = await withTimeout(
             supabase.from('boutiques').select('*').eq('id', currentBoutiqueId).limit(1).maybeSingle(),
             4000
           );
           if (bData) {
-            const converted = boutiqueToPatron(bData);
+            bDataRecord = bData;
+          } else {
+            // Recherche par téléphone ou nom dans boutiques
+            const searchPhone = currentPatron?.telephone;
+            const searchNom = currentPatron?.nom_boutique;
+            if (searchPhone || searchNom) {
+              const orCond = [
+                searchPhone ? `telephone.eq.${searchPhone}` : null,
+                searchNom ? `nom_boutique.ilike.%${searchNom}%` : null,
+              ].filter(Boolean).join(',');
+              const { data: bAlt } = await supabase.from('boutiques').select('*').or(orCond).limit(1).maybeSingle();
+              if (bAlt) bDataRecord = bAlt;
+            }
+          }
+
+          if (bDataRecord) {
+            const rawPlan = (bDataRecord.plan || bDataRecord.forfait || '').toLowerCase().trim();
+            const rawStatus = (bDataRecord.status || bDataRecord.statut || '').toLowerCase().trim();
+            const subEndDate = bDataRecord.subscription_end_date || bDataRecord.subscription_end || bDataRecord.fin_abonnement;
+            const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
+            const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
+            const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number(bDataRecord.last_payment_amount) >= 50000;
+
+            const converted = boutiqueToPatron(bDataRecord);
             if (currentPatron) {
               currentPatron = {
                 ...currentPatron,
                 ...converted,
+                subscription_status: isPro ? 'pro' : converted.subscription_status,
+                current_plan: isPro ? 'pro' : converted.current_plan,
+                isProActive: isPro,
+                statut: isStatusActive ? 'ACTIF' : currentPatron.statut,
+                subscription_end_date: subEndDate || currentPatron.subscription_end_date,
+                abonnement_expire: subEndDate || currentPatron.abonnement_expire,
                 pin_code: currentPatron.pin_code || converted.pin_code,
                 code_pin: currentPatron.code_pin || converted.code_pin,
               };
@@ -383,7 +416,7 @@ export default function App() {
             }
             await db.patrons.put(currentPatron);
           } else {
-            // Fallback table patrons
+            // Fallback table patrons: UNIQUEMENT pour nom/pin/solde, JAMAIS pour subscription_status !
             const query = supabase
               .from('patrons')
               .select('*')
@@ -423,11 +456,13 @@ export default function App() {
                   role: 'patron',
                   solde: Number(remotePatron.solde) || 0,
                   abonnement_expire: new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
-                  subscription_status: remotePatron.subscription_status || 'trial',
+                  subscription_status: 'trial',
                   created_at: remotePatron.created_at || new Date().toISOString(),
                 };
               }
-              await db.patrons.put(currentPatron);
+              if (currentPatron) {
+                await db.patrons.put(currentPatron);
+              }
             }
           }
         } catch (syncErr) {
@@ -441,22 +476,31 @@ export default function App() {
         }
         const now = new Date();
         let patronNeedsUpdate = false;
-        if (!currentPatron.trial_start_date) {
-          const created = new Date(currentPatron.created_at || Date.now());
-          const trialEnd = new Date(created.getTime() + 21 * 24 * 60 * 60 * 1000);
-          currentPatron.trial_start_date = created.toISOString();
-          currentPatron.trial_end_date = trialEnd.toISOString();
-          currentPatron.subscription_status = 'trial';
-          currentPatron.subscription_end_date = trialEnd.toISOString();
-          patronNeedsUpdate = true;
-        }
-        if (
-          (currentPatron.subscription_status === 'trial' || !currentPatron.subscription_status) &&
-          currentPatron.trial_end_date &&
-          now > new Date(currentPatron.trial_end_date)
-        ) {
-          currentPatron.subscription_status = 'expired';
-          patronNeedsUpdate = true;
+
+        // RÈGLE : Si PRO actif (lu depuis boutiques), ne JAMAIS forcer trial ni expiré !
+        if (currentPatron.isProActive || currentPatron.subscription_status === 'pro') {
+          currentPatron.subscription_status = 'pro';
+          currentPatron.current_plan = 'pro';
+          currentPatron.isProActive = true;
+          currentPatron.statut = 'ACTIF';
+        } else {
+          if (!currentPatron.trial_start_date) {
+            const created = new Date(currentPatron.created_at || Date.now());
+            const trialEnd = new Date(created.getTime() + 21 * 24 * 60 * 60 * 1000);
+            currentPatron.trial_start_date = created.toISOString();
+            currentPatron.trial_end_date = trialEnd.toISOString();
+            currentPatron.subscription_status = 'trial';
+            currentPatron.subscription_end_date = trialEnd.toISOString();
+            patronNeedsUpdate = true;
+          }
+          if (
+            (currentPatron.subscription_status === 'trial' || !currentPatron.subscription_status) &&
+            currentPatron.trial_end_date &&
+            now > new Date(currentPatron.trial_end_date)
+          ) {
+            currentPatron.subscription_status = 'expired';
+            patronNeedsUpdate = true;
+          }
         }
 
         if (!currentPatron.referral_code) {
@@ -530,18 +574,23 @@ export default function App() {
               }
             }
 
+            // Détermine le filtre Supabase par boutique active
+            const btqFilter = currentBoutiqueId && currentBoutiqueId !== currentPatron.id
+              ? `boutique_id.eq.${currentBoutiqueId}`
+              : `boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`;
+
             // B. Rechargement des produits depuis Supabase (sans jamais effacer le cache local si Supabase est vide)
             const { data: remoteProds, error: prodErr } = await supabase
               .from('produits')
               .select('*')
-              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`)
+              .or(btqFilter)
               .order('created_at', { ascending: false });
 
             if (!prodErr && remoteProds && remoteProds.length > 0) {
               await db.produits.bulkPut(
                 remoteProds.map((p) => ({
                   id: p.id,
-                  boutique_id: currentPatron.id,
+                  boutique_id: currentBoutiqueId,
                   patron_id: currentPatron.id,
                   nom: p.nom,
                   prix_achat: Number(p.prix_achat) || 0,
@@ -559,13 +608,13 @@ export default function App() {
             const { data: remoteEmps, error: empErr } = await supabase
               .from('employes')
               .select('*')
-              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`)
+              .or(btqFilter)
               .order('created_at', { ascending: false });
             if (!empErr && remoteEmps && remoteEmps.length > 0) {
               await db.employes.bulkPut(
                 remoteEmps.map((e) => ({
                   id: e.id,
-                  boutique_id: currentPatron.id,
+                  boutique_id: currentBoutiqueId,
                   patron_id: currentPatron.id,
                   nom: e.nom,
                   role: (e.role as any) || 'vendeuse',
@@ -593,7 +642,7 @@ export default function App() {
               const { data: remoteVentes } = await supabase
                 .from('ventes')
                 .select('*')
-                .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`);
+                .or(btqFilter);
               if (remoteVentes && remoteVentes.length > 0) {
                 for (const v of remoteVentes) {
                   fetchedVentesMap.set(v.id, v);
@@ -608,7 +657,7 @@ export default function App() {
               const { data: remoteTrans } = await supabase
                 .from('transactions')
                 .select('*')
-                .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`);
+                .or(btqFilter);
               if (remoteTrans && remoteTrans.length > 0) {
                 for (const t of remoteTrans) {
                   if (!fetchedVentesMap.has(t.id)) {
@@ -633,7 +682,7 @@ export default function App() {
                 id: v.id,
                 ticket_id: v.ticket_id || v.id,
                 patron_id: currentPatron.id,
-                boutique_id: currentPatron.id,
+                boutique_id: currentBoutiqueId,
                 produit_id: v.produit_id || '',
                 produit_nom: v.produit_nom || '',
                 qte: Number(v.qte || v.quantite) || 1,
@@ -661,12 +710,13 @@ export default function App() {
             const { data: remoteDep, error: depErr } = await supabase
               .from('depenses')
               .select('*')
-              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`);
+              .or(btqFilter);
             if (!depErr && remoteDep && remoteDep.length > 0) {
               await db.depenses.bulkPut(
                 remoteDep.map((d) => ({
                   id: d.id,
                   patron_id: currentPatron.id,
+                  boutique_id: currentBoutiqueId,
                   type: d.type || 'autre',
                   montant: Number(d.montant) || 0,
                   description: d.description || '',
@@ -681,13 +731,14 @@ export default function App() {
             const { data: remoteCred, error: credErr } = await supabase
               .from('credits')
               .select('*')
-              .or(`boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`);
+              .or(btqFilter);
             if (!credErr && remoteCred && remoteCred.length > 0) {
               await db.credits.bulkPut(
                 remoteCred.map((c) => ({
                   id: c.id,
                   sale_id: c.sale_id || '',
                   patron_id: currentPatron.id,
+                  boutique_id: currentBoutiqueId,
                   client_nom: c.client_nom || '',
                   montant_initial: Number(c.montant_initial) || 0,
                   reste_a_payer: Number(c.reste_a_payer) || 0,
@@ -719,13 +770,13 @@ export default function App() {
           console.warn('[App] Erreur getOwnerStores:', stErr);
         }
 
-        // Filtrage strict par currentPatron.id (boutique_id)
+        // Filtrage par boutique courante (currentBoutiqueId)
         const [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
-          db.employes.where('patron_id').equals(currentPatron.id).toArray(),
-          db.produits.where('patron_id').equals(currentPatron.id).toArray(),
-          db.ventes.where('patron_id').equals(currentPatron.id).toArray(),
-          db.depenses.where('patron_id').equals(currentPatron.id).toArray(),
-          db.credits.where('patron_id').equals(currentPatron.id).toArray(),
+          db.employes.filter((e) => e.boutique_id === currentBoutiqueId || e.patron_id === currentBoutiqueId).toArray(),
+          db.produits.filter((p) => p.boutique_id === currentBoutiqueId || p.patron_id === currentBoutiqueId).toArray(),
+          db.ventes.filter((v) => v.boutique_id === currentBoutiqueId || v.patron_id === currentBoutiqueId).toArray(),
+          db.depenses.filter((d) => (d as any).boutique_id === currentBoutiqueId || d.patron_id === currentBoutiqueId).toArray(),
+          db.credits.filter((c) => (c as any).boutique_id === currentBoutiqueId || c.patron_id === currentBoutiqueId).toArray(),
           db.parrainage.where('parrain_id').equals(currentPatron.id).toArray(),
         ]);
         setEmployes(empList);
@@ -1015,12 +1066,14 @@ export default function App() {
     if (!pendingVoiceAction || !patron || !currentUser) return;
     const action = pendingVoiceAction;
     setPendingVoiceAction(null);
+    const activeBoutiqueId = getActiveBoutiqueId(patron);
+
     try {
       if (action.type === 'vente') {
         const saleData = action.data;
         const saleId = 'vente-vocal-' + Date.now();
         const nowIso = new Date().toISOString();
-        const saleRecord: Vente = { id: saleId, patron_id: patron.id, boutique_id: patron.id, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: true };
+        const saleRecord: Vente = { id: saleId, patron_id: patron.id, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: true };
 
         const currentProd = products.find((p) => p.id === saleData.produit_id);
         const newStock = Math.max(0, (currentProd?.stock_qte ?? 0) - saleData.qte);
@@ -1028,13 +1081,13 @@ export default function App() {
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase.from('produits').update({ stock_qte: newStock }).eq('id', saleData.produit_id);
-            await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: patron.id }], { onConflict: 'id' });
+            await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
             try {
               await supabase.from('transactions').upsert([{
                 id: saleId,
                 ticket_id: saleId,
                 patron_id: patron.id,
-                boutique_id: patron.id,
+                boutique_id: activeBoutiqueId,
                 produit_id: saleData.produit_id,
                 produit_nom: saleData.produit_nom,
                 qte: saleData.qte,
@@ -1061,7 +1114,7 @@ export default function App() {
         }
         if (saleData.est_credit) {
           const creditId = 'credit-vocal-' + Date.now();
-          const creditRecord: Credit = { id: creditId, patron_id: patron.id, boutique_id: patron.id, client_nom: saleData.client_nom || 'Client crédit', montant_initial: saleData.montant_total, reste_a_payer: saleData.reste_a_payer, dernier_paiement: nowIso, synced: true };
+          const creditRecord: Credit = { id: creditId, patron_id: patron.id, boutique_id: activeBoutiqueId, client_nom: saleData.client_nom || 'Client crédit', montant_initial: saleData.montant_total, reste_a_payer: saleData.reste_a_payer, dernier_paiement: nowIso, synced: true };
           if (typeof navigator !== 'undefined' && navigator.onLine) {
             try {
               await supabase.from('credits').upsert([creditRecord], { onConflict: 'id' });
@@ -1071,12 +1124,12 @@ export default function App() {
           }
           await db.credits.put(creditRecord);
         }
-        logAction({ patron_id: patron.id, boutique_id: patron.id, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'vente', description: `Vente vocale ${saleData.qte}x ${saleData.produit_nom} (${saleData.montant_total}F) par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`, montant: saleData.montant_total }).catch(console.error);
+        logAction({ patron_id: patron.id, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'vente', description: `Vente vocale ${saleData.qte}x ${saleData.produit_nom} (${saleData.montant_total}F) par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`, montant: saleData.montant_total }).catch(console.error);
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'depense') {
         const depData = action.data;
         const depId = 'dep-vocal-' + Date.now();
-        const depRecord: Depense = { id: depId, patron_id: patron.id, boutique_id: patron.id, type: depData.type, montant: depData.montant, description: depData.description, cree_par: currentUser.nom, date: new Date().toISOString(), synced: true };
+        const depRecord: Depense = { id: depId, patron_id: patron.id, boutique_id: activeBoutiqueId, type: depData.type, montant: depData.montant, description: depData.description, cree_par: currentUser.nom, date: new Date().toISOString(), synced: true };
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase.from('depenses').upsert([depRecord], { onConflict: 'id' });
@@ -1085,7 +1138,7 @@ export default function App() {
                 id: depId,
                 ticket_id: depId,
                 patron_id: patron.id,
-                boutique_id: patron.id,
+                boutique_id: activeBoutiqueId,
                 produit_id: 'depense',
                 produit_nom: `Dépense: ${depData.type}`,
                 qte: 1,
@@ -1108,13 +1161,13 @@ export default function App() {
       } else if (action.type === 'produit') {
         const prodData = action.data;
         const prodId = 'prod-vocal-' + Date.now();
-        const prodRecord: Produit = { id: prodId, patron_id: patron.id, boutique_id: patron.id, nom: prodData.nom, photo_url: 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=400&q=80', prix_achat: prodData.prix_achat, prix_vente: prodData.prix_vente, stock_qte: prodData.stock_qte, seuil_alerte: 5, created_at: new Date().toISOString() };
+        const prodRecord: Produit = { id: prodId, patron_id: patron.id, boutique_id: activeBoutiqueId, nom: prodData.nom, photo_url: 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=400&q=80', prix_achat: prodData.prix_achat, prix_vente: prodData.prix_vente, stock_qte: prodData.stock_qte, seuil_alerte: 5, created_at: new Date().toISOString() };
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase.from('produits').insert([{
               id: prodId,
               patron_id: patron.id,
-              boutique_id: patron.id,
+              boutique_id: activeBoutiqueId,
               nom: prodRecord.nom,
               prix_achat: prodRecord.prix_achat,
               prix_vente: prodRecord.prix_vente,

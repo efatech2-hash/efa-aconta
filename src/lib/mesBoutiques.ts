@@ -4,7 +4,9 @@ import { queueSyncItem } from './sync';
 import { isSubscriptionExpired } from './checkLimits';
 import { verifyPin } from './security';
 import type { Patron, Produit, Employe } from './types';
-import { boutiqueToPatron } from './deviceAuth';
+import { boutiqueToPatron, getActiveBoutiqueId } from './deviceAuth';
+
+export { getActiveBoutiqueId };
 
 export const PRO_MAX_ARTICLES = 300;
 export const PRO_MAX_EMPLOYEES = 10;
@@ -45,17 +47,21 @@ export async function isPatronGloballyPro(patron?: Patron | null): Promise<boole
       const orFilter = `id.eq.${mainStoreId},patron_id.eq.${mainStoreId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`;
       const { data: btqs } = await supabase
         .from('boutiques')
-        .select('id, plan, status, last_payment_amount')
+        .select('id, plan, status, statut, last_payment_amount')
         .or(orFilter);
 
       if (btqs && btqs.length > 0) {
         const found = btqs.some((b) => {
-          const p = (b.plan || '').toLowerCase();
+          const p = (b.plan || '').toLowerCase().trim();
+          const s = (b.status || (b as any).statut || '').toLowerCase().trim();
+          const isAct = s === 'active' || s === 'actif' || s === '';
+          const isNotTr = p !== 'trial' && p !== 'essai' && p !== 'free' && p !== '';
           const amt = Number(b.last_payment_amount) || 0;
-          return p === 'pro' || p.includes('pro') || amt >= 50000;
+          return (isNotTr && isAct) || p === 'pro' || p.includes('pro') || amt >= 50000;
         });
         if (found) {
           patron.isProActive = true;
+          patron.subscription_status = 'pro';
           return true;
         }
       }

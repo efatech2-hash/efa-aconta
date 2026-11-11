@@ -23,6 +23,7 @@ import { getAccord } from '../lib/accord';
 import { logAction } from '../lib/historique';
 import { BoutonRetour } from './BoutonRetour';
 import { supabase } from '../lib/supabase';
+import { getActiveBoutiqueId } from '../lib/deviceAuth';
 
 interface MonArgentScreenProps {
   patron: Patron;
@@ -144,6 +145,11 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
   const fetchRemoteData = async () => {
     if (typeof navigator === 'undefined' || !navigator.onLine) return;
     try {
+      const activeBoutiqueId = getActiveBoutiqueId(patron);
+      const orClause = activeBoutiqueId && activeBoutiqueId !== patron.id
+        ? `boutique_id.eq.${activeBoutiqueId}`
+        : `boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`;
+
       // 1. Lire les ventes depuis Supabase (table 'ventes' ET 'transactions')
       const fetchedVentesMap = new Map<string, Vente>();
 
@@ -151,7 +157,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         const { data: vData } = await supabase
           .from('ventes')
           .select('*')
-          .or(`boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`)
+          .or(orClause)
           .order('date', { ascending: false });
 
         if (vData && vData.length > 0) {
@@ -160,7 +166,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
               id: v.id,
               ticket_id: v.ticket_id || v.id,
               patron_id: v.patron_id || patron.id,
-              boutique_id: v.boutique_id || patron.id,
+              boutique_id: v.boutique_id || activeBoutiqueId,
               produit_id: v.produit_id || '',
               produit_nom: v.produit_nom || '',
               qte: Number(v.qte) || 1,
@@ -187,7 +193,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         const { data: tData } = await supabase
           .from('transactions')
           .select('*')
-          .or(`boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`)
+          .or(orClause)
           .order('date', { ascending: false });
 
         if (tData && tData.length > 0) {
@@ -197,7 +203,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
                 id: t.id,
                 ticket_id: t.ticket_id || t.id,
                 patron_id: t.patron_id || patron.id,
-                boutique_id: t.boutique_id || patron.id,
+                boutique_id: t.boutique_id || activeBoutiqueId,
                 produit_id: t.produit_id || '',
                 produit_nom: t.produit_nom || '',
                 qte: Number(t.qte || t.quantite) || 1,
@@ -230,7 +236,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         const { data: cData } = await supabase
           .from('credits')
           .select('*')
-          .or(`boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`)
+          .or(orClause)
           .order('dernier_paiement', { ascending: false });
 
         if (cData && cData.length > 0) {
@@ -239,6 +245,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
               id: c.id,
               sale_id: c.sale_id || '',
               patron_id: c.patron_id || patron.id,
+              boutique_id: c.boutique_id || activeBoutiqueId,
               client_nom: c.client_nom || '',
               montant_initial: Number(c.montant_initial) || 0,
               reste_a_payer: Number(c.reste_a_payer) || 0,
@@ -257,7 +264,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         const { data: dData } = await supabase
           .from('depenses')
           .select('*')
-          .or(`boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`)
+          .or(orClause)
           .order('date', { ascending: false });
 
         if (dData && dData.length > 0) {
@@ -265,6 +272,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
             dData.map((d) => ({
               id: d.id,
               patron_id: d.patron_id || patron.id,
+              boutique_id: d.boutique_id || activeBoutiqueId,
               type: d.type || 'autre',
               montant: Number(d.montant) || 0,
               description: d.description || '',
@@ -416,12 +424,14 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       synced: true,
     };
 
+    const activeBoutiqueId = getActiveBoutiqueId(patron);
+
     try {
       // Enregistrement DIRECT dans Supabase (table depenses, expenses et transactions)
       const depRecord = {
         id: depenseId,
         patron_id: patron.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         type: newDepense.type,
         montant: newDepense.montant,
         description: newDepense.description || '',
@@ -434,7 +444,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         id: 'tx-' + depenseId,
         ticket_id: depenseId,
         patron_id: patron.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         produit_id: 'depense',
         produit_nom: `Dépense: ${newDepense.type}`,
         qte: 1,
@@ -462,20 +472,27 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
-            .eq('id', patron.id)
+            .eq('id', activeBoutiqueId)
             .maybeSingle();
           let currentSolde = Number(btqData?.solde);
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
-              .eq('id', patron.id)
+              .eq('id', activeBoutiqueId)
               .maybeSingle();
             currentSolde = Number(pData?.solde) || 0;
           }
           const updatedSolde = Math.max(0, currentSolde - montant);
-          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', patron.id);
-          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', patron.id);
+          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
+          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
+          if (patron.id && patron.id !== activeBoutiqueId) {
+            try {
+              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+              const mainSolde = Math.max(0, (Number(mainBtq?.solde) || 0) - montant);
+              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
+            } catch {}
+          }
           setRemoteSolde(updatedSolde);
           patron.solde = updatedSolde;
           try {
@@ -496,7 +513,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       await logAction({
         patron_id: patron.id,
         user_id: currentUser.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         qui: currentUser.nom,
         employe_id: currentUser.role !== 'patron' ? currentUser.id : null,
         employe_nom: currentUser.nom,
@@ -538,12 +555,13 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       synced: typeof navigator !== 'undefined' && navigator.onLine,
     };
 
+    const activeBoutiqueId = getActiveBoutiqueId(patron);
     const txRembId = 'remb-' + Date.now();
     const rowTxRemb = {
       id: txRembId,
       ticket_id: selectedCredit.sale_id || ('credit-' + selectedCredit.id),
       patron_id: patron.id,
-      boutique_id: patron.id,
+      boutique_id: activeBoutiqueId,
       produit_id: 'remboursement_credit',
       produit_nom: `Remboursement crédit (${selectedCredit.client_nom})`,
       qte: 1,
@@ -579,20 +597,27 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
-            .eq('id', patron.id)
+            .eq('id', activeBoutiqueId)
             .maybeSingle();
           let currentSolde = Number(btqData?.solde);
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
-              .eq('id', patron.id)
+              .eq('id', activeBoutiqueId)
               .maybeSingle();
             currentSolde = Number(pData?.solde) || 0;
           }
           const updatedSolde = currentSolde + montantPaye;
-          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', patron.id);
-          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', patron.id);
+          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
+          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
+          if (patron.id && patron.id !== activeBoutiqueId) {
+            try {
+              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+              const mainSolde = (Number(mainBtq?.solde) || 0) + montantPaye;
+              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
+            } catch {}
+          }
           setRemoteSolde(updatedSolde);
           patron.solde = updatedSolde;
           try {
@@ -617,7 +642,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       await logAction({
         patron_id: patron.id,
         user_id: currentUser.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         qui: currentUser.nom,
         employe_id: currentUser.role !== 'patron' ? currentUser.id : null,
         employe_nom: currentUser.nom,
@@ -776,10 +801,11 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       await db.logsSuppression.put(logEntry);
       await queueSyncItem('logs_suppression', 'insert', logEntry.id, logEntry);
 
+      const activeBoutiqueId = getActiveBoutiqueId(patron);
       await logAction({
         patron_id: patron.id,
         user_id: currentUser.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         qui: currentUser.nom,
         action_type: 'suppression',
         description: `Annulation vente ${vente.qte}x ${vente.produit_nom} (${vente.montant_total}F). Motif: Annulation erreur de saisie`,

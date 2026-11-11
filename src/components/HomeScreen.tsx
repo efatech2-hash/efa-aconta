@@ -44,9 +44,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const isPatron = currentUser.role === 'patron';
   const accord = getAccord(currentUser.genre);
   const remainingTrialDays = getRemainingTrialDays(patron);
-  const currentPlan = patron.subscription_status || 'trial';
-  const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
   const isPro = isProActive(patron);
+  const currentPlan = (isPro || patron.subscription_status === 'pro') ? 'pro' : (patron.subscription_status || 'trial');
+  const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
   const isSubOfPro = Boolean(patron.isSubOfPro || (isSubStore && isPro));
 
   // MODIF 2: Bienvenue patron / patronne automatique selon le genre

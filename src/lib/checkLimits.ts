@@ -129,10 +129,12 @@ export function isBoutiquePro(patron?: Patron | null): boolean {
   const status = (patron.subscription_status || '').toLowerCase();
   const plan = (patron.current_plan || '').toLowerCase();
   const forfait = (patron.forfait || '').toLowerCase();
+  const statut = (patron.statut || '').toLowerCase();
   return (
     status === 'pro' ||
     plan === 'pro' ||
     forfait.includes('pro') ||
+    statut.includes('pro') ||
     patron.isProActive === true ||
     patron.isSubOfPro === true
   );
@@ -151,17 +153,21 @@ export async function isPatronOrAnyBoutiquePro(patron?: Patron | null): Promise<
       const orFilter = `id.eq.${ownerId},patron_id.eq.${ownerId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`;
       const { data: btqs } = await supabase
         .from('boutiques')
-        .select('id, plan, status, last_payment_amount')
+        .select('id, plan, status, statut, last_payment_amount')
         .or(orFilter);
 
       if (btqs && btqs.length > 0) {
         const found = btqs.some((b) => {
-          const p = (b.plan || '').toLowerCase();
+          const p = (b.plan || '').toLowerCase().trim();
+          const s = (b.status || (b as any).statut || '').toLowerCase().trim();
+          const isAct = s === 'active' || s === 'actif' || s === '';
+          const isNotTr = p !== 'trial' && p !== 'essai' && p !== 'free' && p !== '';
           const amt = Number(b.last_payment_amount) || 0;
-          return p === 'pro' || p.includes('pro') || amt >= 50000;
+          return (isNotTr && isAct) || p === 'pro' || p.includes('pro') || amt >= 50000;
         });
         if (found) {
           patron.isProActive = true;
+          patron.subscription_status = 'pro';
           return true;
         }
       }
@@ -362,6 +368,15 @@ export function useAbonnement(patron?: Patron | null) {
  */
 export function isSubscriptionExpired(patron?: Patron | null): boolean {
   if (!patron) return false;
+  // Si le patron est PRO actif, il n'est JAMAIS expiré d'essai
+  if (isBoutiquePro(patron) || patron.isProActive === true) {
+    if (patron.subscription_end_date) {
+      const now = new Date();
+      const end = new Date(patron.subscription_end_date);
+      return now > end;
+    }
+    return false;
+  }
   if (patron.subscription_status === 'expired') return true;
 
   // Si statut 'trial', vérifier la date de fin
@@ -483,7 +498,8 @@ export function canAddAppareil(patron: Patron | null | undefined, currentCount: 
   if (!patron) return false;
   if (isSubscriptionExpired(patron)) return false;
 
-  const status: SubscriptionStatus = patron.subscription_status || 'trial';
+  const isPro = isBoutiquePro(patron) || patron.isProActive === true;
+  const status: SubscriptionStatus = isPro ? 'pro' : (patron.subscription_status || 'trial');
   const limits: Record<SubscriptionStatus, number> = {
     free: 1,
     populaire: 3,
@@ -492,7 +508,7 @@ export function canAddAppareil(patron: Patron | null | undefined, currentCount: 
     expired: 0,
   };
 
-  const max = limits[status] ?? 1;
+  const max = limits[status] ?? (isPro ? 5 : 1);
   return currentCount < max;
 }
 
@@ -503,7 +519,8 @@ export function canAddBoutique(patron: Patron | null | undefined, currentCount: 
   if (!patron) return false;
   if (isSubscriptionExpired(patron)) return false;
 
-  const status: SubscriptionStatus = patron.subscription_status || 'trial';
+  const isPro = isBoutiquePro(patron) || patron.isProActive === true;
+  const status: SubscriptionStatus = isPro ? 'pro' : (patron.subscription_status || 'trial');
   const limits: Record<SubscriptionStatus, number> = {
     free: 1,
     populaire: 1,
@@ -512,7 +529,7 @@ export function canAddBoutique(patron: Patron | null | undefined, currentCount: 
     expired: 0,
   };
 
-  const max = limits[status] ?? 1;
+  const max = limits[status] ?? (isPro ? 3 : 1);
   return currentCount < max;
 }
 

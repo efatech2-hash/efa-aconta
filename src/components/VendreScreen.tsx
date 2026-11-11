@@ -27,6 +27,7 @@ import { logAction } from '../lib/historique';
 import { BoutonRetour } from './BoutonRetour';
 import { isBoutiquePro } from '../lib/checkLimits';
 import { supabase } from '../lib/supabase';
+import { getActiveBoutiqueId } from '../lib/deviceAuth';
 
 interface VendreScreenProps {
   patron: Patron;
@@ -293,7 +294,8 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
     const nowIso = new Date().toISOString();
     const parsedReste = creditMode ? parseInt(resteAPayer, 10) || totalGeneral : 0;
 
-    const activeBoutiqueId = patron.id;
+    // RÈGLE : patron.id = ID boutique principale (btq_...). Pour Boutique 2, activeBoutiqueId = btq_sub_...
+    const activeBoutiqueId = getActiveBoutiqueId(patron);
 
     try {
       // 1. Sauvegarder chaque ligne de vente et décrémenter les stocks directement dans Supabase & local
@@ -462,23 +464,34 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         let finalNewSolde = (Number(patron.solde) || 0) + montantEntreEnCaisse;
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
+            // Mise à jour de la boutique active (Boutique 1 ou 2 ou 3)
             const { data: btqData } = await supabase
               .from('boutiques')
               .select('solde')
-              .eq('id', patron.id)
+              .eq('id', activeBoutiqueId)
               .maybeSingle();
             let currentSolde = Number(btqData?.solde);
             if (isNaN(currentSolde)) {
               const { data: pData } = await supabase
                 .from('patrons')
                 .select('solde')
-                .eq('id', patron.id)
+                .eq('id', activeBoutiqueId)
                 .maybeSingle();
               currentSolde = Number(pData?.solde) || 0;
             }
             finalNewSolde = currentSolde + montantEntreEnCaisse;
-            await supabase.from('boutiques').update({ solde: finalNewSolde }).eq('id', patron.id);
-            await supabase.from('patrons').update({ solde: finalNewSolde }).eq('id', patron.id);
+            await supabase.from('boutiques').update({ solde: finalNewSolde }).eq('id', activeBoutiqueId);
+            await supabase.from('patrons').update({ solde: finalNewSolde }).eq('id', activeBoutiqueId);
+
+            // Si boutique active est une sous-boutique, mettre également à jour la boutique principale
+            if (patron.id && patron.id !== activeBoutiqueId) {
+              try {
+                const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+                const mainSolde = (Number(mainBtq?.solde) || 0) + montantEntreEnCaisse;
+                await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
+                await supabase.from('patrons').update({ solde: mainSolde }).eq('id', patron.id);
+              } catch {}
+            }
           } catch (sErr) {
             console.warn('[VendreScreen] Note mise à jour solde caisse Supabase:', sErr);
           }

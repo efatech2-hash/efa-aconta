@@ -167,7 +167,13 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                   <h1 className="text-xs sm:text-sm md:text-base font-black text-gray-900 leading-tight truncate">
                     {welcomePrefix} {currentUser.prenom || currentUser.nom} !
                   </h1>
-                  {isSubOfPro && (
+                  {isPro && (
+                    <span className="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 text-amber-950 text-[10px] font-black uppercase shadow-xs shrink-0 flex items-center gap-1">
+                      <Crown className="w-3 h-3 fill-amber-950" />
+                      PRO
+                    </span>
+                  )}
+                  {isSubOfPro && !isPro && (
                     <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 border border-slate-300 text-[9px] sm:text-[10px] font-black uppercase shadow-2xs shrink-0">
                       PRO - Incluse dans Principale
                     </span>

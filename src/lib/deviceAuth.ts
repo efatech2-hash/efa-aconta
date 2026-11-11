@@ -94,6 +94,22 @@ export function getDeviceName(): string {
 }
 
 /**
+ * Récupère l'ID de la boutique active sélectionnée
+ * patron.id = ID de la boutique PRINCIPALE (btq_...)
+ * boutique active de Boutique 2 = btq_sub_...
+ * Donc boutique_id doit être = ID de la boutique active sélectionnée (btq_sub_...), PAS patron.id.
+ */
+export function getActiveBoutiqueId(patron?: { id?: string } | null): string {
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    const devStoreId = localStorage.getItem('deviceStoreId');
+    if (devStoreId && devStoreId.trim()) return devStoreId.trim();
+    const curBtqId = localStorage.getItem('currentBoutiqueId');
+    if (curBtqId && curBtqId.trim()) return curBtqId.trim();
+  }
+  return patron?.id || '';
+}
+
+/**
  * Récupère l'ID de la boutique courante
  */
 export function getCurrentBoutiqueId(): string | null {
@@ -108,10 +124,22 @@ export function getCurrentBoutiqueId(): string | null {
 
 /**
  * Convertit un enregistrement boutique en objet Patron pour compatibilité complète
+ * RÈGLE D'OR : Le vrai PRO est dans boutiques : plan (pro, pro_annuel, populaire) + status = active + subscription_end_date.
+ * si plan != trial et status = active, affiche PRO.
  */
 export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string): Patron {
   const pin = pinClear || b.pin_code || b.code_pin || '';
   const finAbonnement = (b as any).subscription_end || (b as any).subscription_end_date || (b as any).fin_abonnement || b.date_fin_essai;
+  const rawPlan = ((b as any).plan || (b as any).forfait || '').toLowerCase().trim();
+  const rawStatus = ((b as any).status || (b as any).statut || '').toLowerCase().trim();
+  const amt = Number((b as any).last_payment_amount) || 0;
+
+  const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
+  const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
+  const isPro = (isPlanNotTrial && isStatusActive) || rawPlan === 'pro' || rawPlan.includes('pro') || amt >= 50000 || (b as any).isProActive === true;
+  const isPopulaire = !isPro && (rawPlan === 'populaire' || rawPlan.includes('populaire'));
+  const effectiveStatus = isPro ? 'pro' : (isPopulaire ? 'populaire' : (rawPlan === 'essai' ? 'trial' : (rawPlan || 'trial')));
+
   return {
     id: b.id,
     nom: (b as any).proprietaire || b.nom_patron || b.nom_affichage || (b as any).nom || 'Patron',
@@ -125,29 +153,16 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
     pin_hash: b.pin_patron_hash || (b as any).pin_hash,
     genre: (b as any).genre === 'homme' ? 'homme' : 'femme',
     role: 'patron',
-    abonnement_expire: finAbonnement || b.date_fin_essai,
-    subscription_status: (() => {
-      const rawPlan = ((b as any).plan || (b as any).forfait || '').toLowerCase();
-      const amt = Number((b as any).last_payment_amount) || 0;
-      if (rawPlan === 'pro' || rawPlan.includes('pro') || amt >= 50000 || (b as any).isProActive === true) {
-        return 'pro';
-      }
-      if (rawPlan === 'populaire' || rawPlan.includes('populaire') || (b as any).statut === 'ACTIF' || (b as any).status === 'actif') {
-        return 'populaire';
-      }
-      return rawPlan === 'essai' ? 'trial' : (rawPlan || 'trial');
-    })(),
-    isProActive: (() => {
-      const rawPlan = ((b as any).plan || (b as any).forfait || '').toLowerCase();
-      const amt = Number((b as any).last_payment_amount) || 0;
-      return rawPlan === 'pro' || rawPlan.includes('pro') || amt >= 50000 || (b as any).isProActive === true;
-    })(),
+    abonnement_expire: finAbonnement,
+    subscription_status: effectiveStatus,
+    current_plan: isPro ? 'pro' : effectiveStatus,
+    isProActive: isPro,
     trial_start_date: b.created_at,
-    trial_end_date: b.date_fin_essai || finAbonnement,
-    subscription_end_date: finAbonnement || b.date_fin_essai,
+    trial_end_date: finAbonnement,
+    subscription_end_date: finAbonnement,
     fin_abonnement: finAbonnement,
-    forfait: (b as any).forfait || b.plan,
-    statut: (b as any).statut,
+    forfait: isPro ? 'pro' : (b as any).forfait || b.plan,
+    statut: isStatusActive ? 'ACTIF' : (b as any).statut,
     referral_code: b.referral_code || (b as any).code_parrain || undefined,
     referred_by: b.referred_by || null,
     referral_bonus_given: (b as any).referral_bonus_given || false,
@@ -480,39 +495,71 @@ export async function loginBoutique({
       const { data: centralBtq } = await supabase
         .from('boutiques')
         .select('*')
-        .or(`nom_boutique.ilike.%${nomOrSlug.trim()}%,nom.ilike.%${nomOrSlug.trim()}%`)
+        .or(`id.eq.${nomOrSlug.trim()},nom_boutique.ilike.%${nomOrSlug.trim()}%,nom.ilike.%${nomOrSlug.trim()}%,proprietaire.ilike.%${nomOrSlug.trim()}%,telephone.eq.${nomOrSlug.trim()}`)
         .limit(1)
         .maybeSingle();
 
       if (centralBtq) {
+        const rawPlan = ((centralBtq as any).plan || (centralBtq as any).forfait || '').toLowerCase().trim();
+        const rawStatus = ((centralBtq as any).status || (centralBtq as any).statut || '').toLowerCase().trim();
+        const subEndDate = (centralBtq as any).subscription_end_date || (centralBtq as any).subscription_end || (centralBtq as any).fin_abonnement || centralBtq.date_fin_essai;
+
+        // RÈGLE : Le vrai PRO est dans boutiques : plan (pro, pro_annuel, populaire) + status = active + subscription_end_date.
+        // si plan != trial et status = active, affiche PRO.
+        const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
+        const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
+        const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number((centralBtq as any).last_payment_amount) >= 50000;
+
         boutique = {
           id: centralBtq.id,
           nom_boutique: slugifyBoutiqueName(centralBtq.nom_boutique),
           nom_affichage: centralBtq.nom_boutique,
-          nom_patron: centralBtq.proprietaire || 'Patron',
+          nom_patron: centralBtq.proprietaire || centralBtq.nom || 'Patron',
           pin_patron_hash: centralBtq.pin_code ? await hashPin(centralBtq.pin_code) : '',
           pin_code: centralBtq.pin_code || '',
-          plan: centralBtq.plan || 'essai',
-          date_fin_essai: centralBtq.subscription_end || new Date(Date.now() + 21 * 86400000).toISOString(),
+          plan: isPro ? 'pro' : (centralBtq.plan || 'essai'),
+          date_fin_essai: subEndDate || new Date(Date.now() + 365 * 86400000).toISOString(),
           created_at: centralBtq.created_at || new Date().toISOString(),
-        };
+          status: isStatusActive ? 'active' : (centralBtq.status || 'active'),
+          subscription_end: subEndDate,
+          subscription_end_date: subEndDate,
+          isProActive: isPro,
+        } as any;
       }
     } catch (e) {
       console.warn('[DeviceAuth] Erreur recherche Supabase boutiques:', e);
     }
 
-
-    // 2. Fallback recherche dans table patrons Supabase
+    // 2. Fallback recherche dans table patrons Supabase (infos patron seulement, JAMAIS subscription_status !)
     if (!boutique) {
       try {
         const { data: remotePatron } = await supabase
           .from('patrons')
           .select('*')
-          .ilike('nom_boutique', `%${nomOrSlug.trim()}%`)
+          .or(`id.eq.${nomOrSlug.trim()},nom_boutique.ilike.%${nomOrSlug.trim()}%,nom.ilike.%${nomOrSlug.trim()}%,telephone.eq.${nomOrSlug.trim()}`)
           .limit(1)
           .maybeSingle();
 
         if (remotePatron) {
+          // RÈGLE : Ne vérifie JAMAIS subscription_status dans patrons. Toujours chercher le vrai plan dans boutiques !
+          let bInfo: any = null;
+          try {
+            const { data: bReal } = await supabase
+              .from('boutiques')
+              .select('*')
+              .or(`id.eq.${remotePatron.id}${remotePatron.telephone ? `,telephone.eq.${remotePatron.telephone}` : ''}`)
+              .limit(1)
+              .maybeSingle();
+            bInfo = bReal;
+          } catch {}
+
+          const rawPlan = ((bInfo?.plan || (remotePatron as any).plan || '').toLowerCase().trim());
+          const rawStatus = ((bInfo?.status || bInfo?.statut || '').toLowerCase().trim());
+          const subEndDate = bInfo?.subscription_end_date || bInfo?.subscription_end || remotePatron.trial_end_date || remotePatron.subscription_end_date;
+          const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
+          const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
+          const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number(bInfo?.last_payment_amount) >= 50000;
+
           boutique = {
             id: remotePatron.id,
             nom_boutique: slugifyBoutiqueName(remotePatron.nom_boutique || nomOrSlug),
@@ -520,10 +567,14 @@ export async function loginBoutique({
             nom_patron: remotePatron.nom || 'Patron',
             pin_patron_hash: remotePatron.pin_hash || '',
             pin_code: remotePatron.pin_code || remotePatron.code_pin || '',
-            plan: remotePatron.subscription_status === 'pro' ? 'pro' : remotePatron.subscription_status === 'populaire' ? 'populaire' : 'essai',
-            date_fin_essai: remotePatron.trial_end_date || remotePatron.subscription_end_date || new Date(Date.now() + 21 * 86400000).toISOString(),
+            plan: isPro ? 'pro' : (rawPlan || 'essai'),
+            date_fin_essai: subEndDate || new Date(Date.now() + 365 * 86400000).toISOString(),
             created_at: remotePatron.created_at || new Date().toISOString(),
-          };
+            status: isStatusActive ? 'active' : 'active',
+            subscription_end: subEndDate,
+            subscription_end_date: subEndDate,
+            isProActive: isPro,
+          } as any;
         }
       } catch (e) {
         // ignore
