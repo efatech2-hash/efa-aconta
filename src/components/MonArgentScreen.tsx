@@ -24,6 +24,7 @@ import { logAction } from '../lib/historique';
 import { BoutonRetour } from './BoutonRetour';
 import { supabase } from '../lib/supabase';
 import { getActiveBoutiqueId } from '../lib/deviceAuth';
+import { generatePrefixedId } from '../lib/uuid';
 
 interface MonArgentScreenProps {
   patron: Patron;
@@ -412,7 +413,8 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     setIsAddingDepense(true);
     setFeedback(null);
 
-    const depenseId = 'dep-' + Date.now();
+    // RÈGLE : ID unique neuf avec crypto.randomUUID()
+    const depenseId = generatePrefixedId('dep');
     const activeBoutiqueId = getActiveBoutiqueId(patron);
     const newDepense: Depense = {
       id: depenseId,
@@ -441,7 +443,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       };
 
       const txDepense = {
-        id: 'tx-' + depenseId,
+        id: generatePrefixedId('tx'),
         ticket_id: depenseId,
         patron_id: patron.id,
         boutique_id: activeBoutiqueId,
@@ -461,11 +463,17 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         try {
           // UPSERT table transactions (onConflict: 'id')
-          await supabase.from('transactions').upsert(txDepense, { onConflict: 'id' });
+          const resTx: any = await supabase.from('transactions').upsert(txDepense, { onConflict: 'id' });
+          if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+            console.log('[Sync 409 Déjà présent]', 'transactions', txDepense.id);
+          }
 
           // Synchronisation miroir depenses
           try {
-            await supabase.from('depenses').upsert(depRecord, { onConflict: 'id' });
+            const resDep: any = await supabase.from('depenses').upsert(depRecord, { onConflict: 'id' });
+            if (resDep?.status === 409 || resDep?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'depenses', depenseId);
+            }
           } catch {}
 
           // Déduire automatiquement le montant de la dépense du Solde en Supabase
@@ -556,7 +564,8 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     };
 
     const activeBoutiqueId = getActiveBoutiqueId(patron);
-    const txRembId = 'remb-' + Date.now();
+    // RÈGLE : ID unique neuf avec crypto.randomUUID()
+    const txRembId = generatePrefixedId('remb');
     const rowTxRemb = {
       id: txRembId,
       ticket_id: selectedCredit.sale_id || ('credit-' + selectedCredit.id),
@@ -590,7 +599,10 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
           // UPSERT direct dans table transactions (onConflict: 'id')
           try {
-            await supabase.from('transactions').upsert(rowTxRemb, { onConflict: 'id' });
+            const resTx: any = await supabase.from('transactions').upsert(rowTxRemb, { onConflict: 'id' });
+            if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'transactions', txRembId);
+            }
           } catch {}
 
           // Remboursement crédit = argent qui entre en caisse -> Solde +
@@ -785,7 +797,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
       // 6. Logger dans logsSuppression et activity_logs / historique_actions
       const logEntry: LogSuppression = {
-        id: 'log-' + Date.now(),
+        id: generatePrefixedId('log'),
         patron_id: patron.id,
         vente_id: vente.id,
         ticket_id: vente.ticket_id,

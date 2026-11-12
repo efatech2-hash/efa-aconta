@@ -28,6 +28,7 @@ import { BoutonRetour } from './BoutonRetour';
 import { isBoutiquePro } from '../lib/checkLimits';
 import { supabase } from '../lib/supabase';
 import { getActiveBoutiqueId } from '../lib/deviceAuth';
+import { generatePrefixedId } from '../lib/uuid';
 
 interface VendreScreenProps {
   patron: Patron;
@@ -290,7 +291,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
 
     setIsLoading(true);
 
-    const ticketId = 'TCK-' + Math.floor(100000 + Math.random() * 900000);
+    const ticketId = generatePrefixedId('tck');
     const nowIso = new Date().toISOString();
     const parsedReste = creditMode ? parseInt(resteAPayer, 10) || totalGeneral : 0;
 
@@ -300,7 +301,8 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
     try {
       // 1. Sauvegarder chaque ligne de vente et décrémenter les stocks directement dans Supabase & local
       for (const item of cart) {
-        const venteId = `vente-${ticketId}-${item.produit_id}`;
+        // RÈGLE : ID unique neuf avec crypto.randomUUID()
+        const venteId = generatePrefixedId('vte');
         const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
 
         const saleRecord = {
@@ -393,6 +395,9 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
             const isTxSuccess = !resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505';
             if (isTxSuccess) {
               onlineSaved = true;
+              if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'transactions', venteId);
+              }
             }
           } catch (ventErr) {
             console.warn('[VendreScreen] Note insertion vente transactions Supabase:', ventErr);
@@ -416,7 +421,8 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
 
       // 2. Si crédit / reste à payer > 0, enregistrer dans la table credits avec boutique_id active
       if (creditMode && parsedReste > 0) {
-        const creditId = 'cred-' + ticketId;
+        // RÈGLE : ID unique neuf avec crypto.randomUUID()
+        const creditId = generatePrefixedId('crd');
         const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
         const creditRecord: Credit = {
           id: creditId,
@@ -442,6 +448,9 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
             const isCredSuccess = !resCred?.error || resCred?.status === 409 || resCred?.error?.code === '23505';
             if (isCredSuccess) {
               creditOnlineSaved = true;
+              if (resCred?.status === 409 || resCred?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'credits', creditId);
+              }
             }
           } catch (cErr) {
             console.warn('[VendreScreen] Note crédit Supabase:', cErr);

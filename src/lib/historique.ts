@@ -4,6 +4,8 @@ import { queueSyncItem } from './sync';
 import type { ActionType, HistoriqueAction, CurrentUser, Patron } from './types';
 import { getActiveBoutiqueId } from './deviceAuth';
 
+import { generatePrefixedId } from './uuid';
+
 export interface LogActionParams {
   patron_id: string;
   boutique_id?: string;
@@ -22,7 +24,8 @@ export interface LogActionParams {
  */
 export async function logAction(params: LogActionParams): Promise<HistoriqueAction> {
   const nowIso = new Date().toISOString();
-  const id = 'act-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
+  // RÈGLE : ID unique neuf avec crypto.randomUUID()
+  const id = generatePrefixedId('act');
   const qui = params.qui || (params.employe_nom ? `Vendeur/se ${params.employe_nom}` : 'Patron');
   const activeBoutiqueId = params.boutique_id || getActiveBoutiqueId({ id: params.patron_id }) || params.patron_id;
 
@@ -42,46 +45,50 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
     created_at: nowIso,
   };
 
+  const syncPayload = {
+    id,
+    user_id: actionRecord.user_id,
+    patron_id: actionRecord.patron_id,
+    boutique_id: actionRecord.boutique_id,
+    employe_id: actionRecord.employe_id,
+    employe_nom: actionRecord.employe_nom,
+    action_type: actionRecord.action_type,
+    description: actionRecord.description,
+    montant: actionRecord.montant,
+    created_at: nowIso,
+  };
+
   try {
     // 1. Sauvegarde locale immédiate
     await db.historiqueActions.put(actionRecord);
 
-    // 2. Queue de synchronisation locale -> Supabase
-    await queueSyncItem('historique_actions', 'insert', id, {
-      id,
-      user_id: actionRecord.user_id,
-      patron_id: actionRecord.patron_id,
-      boutique_id: actionRecord.boutique_id,
-      employe_id: actionRecord.employe_id,
-      action_type: actionRecord.action_type,
-      description: actionRecord.description,
-      montant: actionRecord.montant,
-      created_at: nowIso,
-    });
+    let onlineSaved = false;
 
-    // 3. Envoi direct Supabase table historique_actions
+    // 2. Envoi direct Supabase table historique_actions (upsert anti-conflit)
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
-        await supabase
+        const res = await supabase
           .from('historique_actions')
-          .upsert([{
-            id,
-            user_id: actionRecord.user_id,
-            patron_id: actionRecord.patron_id,
-            boutique_id: actionRecord.boutique_id,
-            employe_id: actionRecord.employe_id,
-            employe_nom: actionRecord.employe_nom,
-            action_type: actionRecord.action_type,
-            description: actionRecord.description,
-            montant: actionRecord.montant,
-            created_at: nowIso,
-          }], { onConflict: 'id' });
+          .upsert([syncPayload], { onConflict: 'id' });
+
+        const isSuccessOrConflict = !res?.error || res?.status === 409 || res?.error?.code === '23505';
+        if (isSuccessOrConflict) {
+          onlineSaved = true;
+          if (res?.status === 409 || res?.error?.code === '23505') {
+            console.log('[Sync 409 Déjà présent]', 'historique_actions', id);
+          }
+        }
       } catch (hErr) {
         console.warn('[Historique] Note upsert historique_actions:', hErr);
       }
 
       // Auto-suppression après 24h : DELETE WHERE created_at < now() - interval '24 hours'
       purgeOldHistoriqueActions().catch(() => {});
+    }
+
+    // 3. Queue de synchronisation uniquement si hors-ligne ou échec
+    if (!onlineSaved) {
+      await queueSyncItem('historique_actions', 'insert', id, syncPayload);
     }
   } catch (err) {
     console.error('[Historique] Erreur enregistrement action:', err);

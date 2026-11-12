@@ -41,7 +41,7 @@ import {
   NOTIF_SETTINGS_EVENT,
 } from '../lib/dailyNotification';
 import { db } from '../lib/db';
-import { queueSyncItem } from '../lib/sync';
+import { queueSyncItem, clearSyncQueue } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
 import { supabase } from '../lib/supabase';
 import { logAction } from '../lib/historique';
@@ -120,26 +120,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isTestingNotif, setIsTestingNotif] = useState(false);
   const [testNotifFeedback, setTestNotifFeedback] = useState<string | null>(null);
 
-  // MODIF 6: Modifier Nom patron
+  // BLOC 1: Profil Patron (photo_profil + nom patron)
   const [patronNom, setPatronNom] = useState(patron.nom);
-  const [isSavingPatronNom, setIsSavingPatronNom] = useState(false);
-  const [patronNomFeedback, setPatronNomFeedback] = useState<string | null>(null);
-
-  // MODIF 6: Modifier Nom boutique
-  const [boutiqueNom, setBoutiqueNom] = useState(patron.nom_boutique || '');
-  const [isSavingBoutiqueNom, setIsSavingBoutiqueNom] = useState(false);
-  const [boutiqueNomFeedback, setBoutiqueNomFeedback] = useState<string | null>(null);
-
-  // Photo profil patron
   const [patronPhotoUrl, setPatronPhotoUrl] = useState<string>(patron.photo_url || '');
+  const [isSavingProfilPatron, setIsSavingProfilPatron] = useState(false);
+  const [profilPatronFeedback, setProfilPatronFeedback] = useState<string | null>(null);
 
-  // Photo devanture boutique
+  // BLOC 2: Ma Boutique (photo_devanture + nom boutique + adresse)
+  const [boutiqueNom, setBoutiqueNom] = useState(patron.nom_boutique || '');
   const [boutiqueDevantureUrl, setBoutiqueDevantureUrl] = useState<string>(patron.photo_devanture || (patron as any).devanture_url || '');
-
-  // Adresse boutique
   const [boutiqueAdresse, setBoutiqueAdresse] = useState(patron.adresse || (patron as any).adresse_boutique || '');
-  const [isSavingBoutiqueAdresse, setIsSavingBoutiqueAdresse] = useState(false);
-  const [boutiqueAdresseFeedback, setBoutiqueAdresseFeedback] = useState<string | null>(null);
+  const [isSavingBoutiqueBloc, setIsSavingBoutiqueBloc] = useState(false);
+  const [boutiqueBlocFeedback, setBoutiqueBlocFeedback] = useState<string | null>(null);
 
   // MODIF 6: Modifier Nom employé
   const [editingEmp, setEditingEmp] = useState<Employe | null>(null);
@@ -149,6 +141,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [devicesList, setDevicesList] = useState<EfaDeviceRecord[]>([]);
   const [isLoadingDevices, setIsLoadingDevices] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
+
+  // Vider la file de synchronisation (anti-blocage 409)
+  const [clearQueueMsg, setClearQueueMsg] = useState<string | null>(null);
+  const handleClearQueue = async () => {
+    const count = await clearSyncQueue();
+    setClearQueueMsg(`File vidée (${count} élément${count > 1 ? 's' : ''})`);
+    setTimeout(() => setClearQueueMsg(null), 3000);
+  };
 
   useEffect(() => {
     if (isOpen && patron?.id) {
@@ -339,35 +339,51 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleUpdatePatronNom = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // BLOC 1 : Sauvegarde simultanée Photo de profil + Nom patron
+  const handleSaveProfilPatron = async () => {
     if (!patronNom.trim()) return;
-    setIsSavingPatronNom(true);
-    setPatronNomFeedback(null);
+    setIsSavingProfilPatron(true);
+    setProfilPatronFeedback(null);
     const newNom = patronNom.trim();
+    const photo = patronPhotoUrl || undefined;
     const oldNom = patron.nom;
+
     try {
-      const updated: Patron = { ...patron, nom: newNom };
-      await db.patrons.update(patron.id, { nom: newNom });
-      await queueSyncItem('patrons', 'update', patron.id, { nom: newNom });
+      const updated: Patron = { ...patron, nom: newNom, photo_url: photo };
+      await db.patrons.update(patron.id, { nom: newNom, photo_url: photo });
+      await queueSyncItem('patrons', 'update', patron.id, { nom: newNom, photo_url: photo || null });
+
       try {
-        await supabase.from('boutiques').update({ proprietaire: newNom, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ nom: newNom }).eq('id', patron.id);
-      } catch {}
+        await supabase.from('boutiques').update({
+          proprietaire: newNom,
+          photo_url: photo || null,
+          photo_profil: photo || null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', patron.id);
+
+        await supabase.from('patrons').update({
+          nom: newNom,
+          photo_url: photo || null,
+        }).eq('id', patron.id);
+      } catch (err) {
+        console.warn('Erreur sauvegarde profil patron Supabase:', err);
+      }
+
       logAction({
         patron_id: patron.id,
         boutique_id: patron.id,
         action_type: 'modif_stock',
         description: `Modification profil patron : nom changé de "${oldNom}" en "${newNom}"`,
       }).catch(console.error);
+
       onPatronUpdated(updated);
-      setPatronNomFeedback('Nom modifié avec succès !');
-      speakFrench(`Nom patron modifié : ${newNom}`);
-      setTimeout(() => setPatronNomFeedback(null), 2500);
+      setProfilPatronFeedback('Profil modifié avec succès !');
+      speakFrench(`Profil patron mis à jour : ${newNom}`);
+      setTimeout(() => setProfilPatronFeedback(null), 3000);
     } catch {
-      setPatronNomFeedback('Erreur lors de la modification');
+      setProfilPatronFeedback('Erreur lors de la modification');
     } finally {
-      setIsSavingPatronNom(false);
+      setIsSavingProfilPatron(false);
     }
   };
 
@@ -378,15 +394,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     });
     if (photo) {
       setPatronPhotoUrl(photo);
-      const updated: Patron = { ...patron, photo_url: photo };
-      await db.patrons.update(patron.id, { photo_url: photo });
-      await queueSyncItem('patrons', 'update', patron.id, { photo_url: photo });
-      try {
-        await supabase.from('boutiques').update({ photo_url: photo, photo_profil: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ photo_url: photo }).eq('id', patron.id);
-      } catch {}
-      onPatronUpdated(updated);
-      speakFrench('Photo de profil mise à jour');
     }
   };
 
@@ -397,28 +404,77 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     });
     if (photo) {
       setPatronPhotoUrl(photo);
-      const updated: Patron = { ...patron, photo_url: photo };
-      await db.patrons.update(patron.id, { photo_url: photo });
-      await queueSyncItem('patrons', 'update', patron.id, { photo_url: photo });
-      try {
-        await supabase.from('boutiques').update({ photo_url: photo, photo_profil: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ photo_url: photo }).eq('id', patron.id);
-      } catch {}
-      onPatronUpdated(updated);
-      speakFrench('Photo de profil mise à jour');
     }
   };
 
-  const handleRemovePatronPhoto = async () => {
+  const handleRemovePatronPhoto = () => {
     setPatronPhotoUrl('');
-    const updated: Patron = { ...patron, photo_url: undefined };
-    await db.patrons.update(patron.id, { photo_url: undefined });
-    await queueSyncItem('patrons', 'update', patron.id, { photo_url: null });
+  };
+
+  // BLOC 2 : Sauvegarde simultanée Photo devanture + Nom boutique + Adresse
+  const handleSaveBoutiqueBloc = async () => {
+    if (!boutiqueNom.trim()) return;
+    setIsSavingBoutiqueBloc(true);
+    setBoutiqueBlocFeedback(null);
+    const newNom = boutiqueNom.trim();
+    const newAdresse = boutiqueAdresse.trim();
+    const photo = boutiqueDevantureUrl || undefined;
+    const oldNom = patron.nom_boutique;
+
     try {
-      await supabase.from('boutiques').update({ photo_url: null, photo_profil: null, updated_at: new Date().toISOString() }).eq('id', patron.id);
-      await supabase.from('patrons').update({ photo_url: null }).eq('id', patron.id);
-    } catch {}
-    onPatronUpdated(updated);
+      const updated: Patron = {
+        ...patron,
+        nom_boutique: newNom,
+        photo_devanture: photo,
+        adresse: newAdresse || undefined,
+      };
+      await db.patrons.update(patron.id, {
+        nom_boutique: newNom,
+        photo_devanture: photo,
+        adresse: newAdresse || undefined,
+      } as any);
+      await queueSyncItem('patrons', 'update', patron.id, {
+        nom_boutique: newNom,
+        photo_devanture: photo || null,
+        adresse: newAdresse || null,
+      });
+
+      try {
+        await supabase.from('boutiques').update({
+          nom_boutique: newNom,
+          nom: newNom,
+          photo_devanture: photo || null,
+          devanture_url: photo || null,
+          adresse: newAdresse || null,
+          adresse_boutique: newAdresse || null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', patron.id);
+
+        await supabase.from('patrons').update({
+          nom_boutique: newNom,
+          photo_devanture: photo || null,
+          adresse: newAdresse || null,
+        } as any).eq('id', patron.id);
+      } catch (err) {
+        console.warn('Erreur sauvegarde boutique Supabase:', err);
+      }
+
+      logAction({
+        patron_id: patron.id,
+        boutique_id: patron.id,
+        action_type: 'modif_stock',
+        description: `Modification boutique : nom changé de "${oldNom}" en "${newNom}"`,
+      }).catch(console.error);
+
+      onPatronUpdated(updated);
+      setBoutiqueBlocFeedback('Boutique modifiée avec succès !');
+      speakFrench(`Boutique mise à jour : ${newNom}`);
+      setTimeout(() => setBoutiqueBlocFeedback(null), 3000);
+    } catch {
+      setBoutiqueBlocFeedback('Erreur lors de la modification');
+    } finally {
+      setIsSavingBoutiqueBloc(false);
+    }
   };
 
   const handleCameraDevanturePhoto = async () => {
@@ -428,15 +484,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     });
     if (photo) {
       setBoutiqueDevantureUrl(photo);
-      const updated: Patron = { ...patron, photo_devanture: photo };
-      await db.patrons.update(patron.id, { photo_devanture: photo } as any);
-      await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: photo });
-      try {
-        await supabase.from('boutiques').update({ photo_devanture: photo, devanture_url: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ photo_devanture: photo } as any).eq('id', patron.id);
-      } catch {}
-      onPatronUpdated(updated);
-      speakFrench('Photo de la devanture mise à jour');
     }
   };
 
@@ -447,90 +494,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     });
     if (photo) {
       setBoutiqueDevantureUrl(photo);
-      const updated: Patron = { ...patron, photo_devanture: photo };
-      await db.patrons.update(patron.id, { photo_devanture: photo } as any);
-      await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: photo });
-      try {
-        await supabase.from('boutiques').update({ photo_devanture: photo, devanture_url: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ photo_devanture: photo } as any).eq('id', patron.id);
-      } catch {}
-      onPatronUpdated(updated);
-      speakFrench('Photo de la devanture mise à jour');
     }
   };
 
-  const handleRemoveDevanturePhoto = async () => {
+  const handleRemoveDevanturePhoto = () => {
     setBoutiqueDevantureUrl('');
-    const updated: Patron = { ...patron, photo_devanture: undefined };
-    await db.patrons.update(patron.id, { photo_devanture: undefined } as any);
-    await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: null });
-    try {
-      await supabase.from('boutiques').update({ photo_devanture: null, devanture_url: null, updated_at: new Date().toISOString() }).eq('id', patron.id);
-      await supabase.from('patrons').update({ photo_devanture: null } as any).eq('id', patron.id);
-    } catch {}
-    onPatronUpdated(updated);
-  };
-
-  const handleUpdateBoutiqueNom = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!boutiqueNom.trim()) return;
-    setIsSavingBoutiqueNom(true);
-    setBoutiqueNomFeedback(null);
-    const newNom = boutiqueNom.trim();
-    const oldNom = patron.nom_boutique;
-    try {
-      const updated: Patron = { ...patron, nom_boutique: newNom };
-      await db.patrons.update(patron.id, { nom_boutique: newNom });
-      await queueSyncItem('patrons', 'update', patron.id, { nom_boutique: newNom });
-      try {
-        await supabase.from('boutiques').update({ nom_boutique: newNom, nom: newNom, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ nom_boutique: newNom }).eq('id', patron.id);
-      } catch {}
-      logAction({
-        patron_id: patron.id,
-        boutique_id: patron.id,
-        action_type: 'modif_stock',
-        description: `Modification boutique : nom changé de "${oldNom}" en "${newNom}"`,
-      }).catch(console.error);
-      onPatronUpdated(updated);
-      setBoutiqueNomFeedback('Nom de boutique modifié !');
-      speakFrench(`Boutique renommée : ${newNom}`);
-      setTimeout(() => setBoutiqueNomFeedback(null), 2500);
-    } catch {
-      setBoutiqueNomFeedback('Erreur lors de la modification');
-    } finally {
-      setIsSavingBoutiqueNom(false);
-    }
-  };
-
-  const handleUpdateBoutiqueAdresse = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSavingBoutiqueAdresse(true);
-    setBoutiqueAdresseFeedback(null);
-    const newAdresse = boutiqueAdresse.trim();
-    try {
-      const updated: Patron = { ...patron, adresse: newAdresse };
-      await db.patrons.update(patron.id, { adresse: newAdresse } as any);
-      await queueSyncItem('patrons', 'update', patron.id, { adresse: newAdresse });
-      try {
-        await supabase.from('boutiques').update({ adresse: newAdresse, adresse_boutique: newAdresse, updated_at: new Date().toISOString() }).eq('id', patron.id);
-        await supabase.from('patrons').update({ adresse: newAdresse } as any).eq('id', patron.id);
-      } catch {}
-      logAction({
-        patron_id: patron.id,
-        boutique_id: patron.id,
-        action_type: 'modif_stock',
-        description: `Modification adresse boutique : "${newAdresse}"`,
-      }).catch(console.error);
-      onPatronUpdated(updated);
-      setBoutiqueAdresseFeedback('Adresse modifiée avec succès !');
-      speakFrench('Adresse boutique enregistrée');
-      setTimeout(() => setBoutiqueAdresseFeedback(null), 2500);
-    } catch {
-      setBoutiqueAdresseFeedback('Erreur lors de la modification');
-    } finally {
-      setIsSavingBoutiqueAdresse(false);
-    }
   };
 
   const handleSaveEditEmpNom = async (e: React.FormEvent) => {
@@ -943,14 +911,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
         </div>
 
-        {/* MODIF 6: SECTION MON PROFIL */}
+        {/* FILE DE SYNCHRONISATION ANTI-BLOCAGE */}
+        <div className="p-3 sm:p-3.5 rounded-xl bg-gray-50/90 border border-gray-200 flex items-center justify-between gap-3">
+          <div className="flex-1 min-w-0 pr-2">
+            <h4 className="font-extrabold text-xs sm:text-sm text-gray-900 leading-snug">
+              Synchronisation des données
+            </h4>
+            <p className="text-[11px] font-medium text-gray-500 mt-0.5 leading-tight">
+              {clearQueueMsg || "En cas de conflit ou lenteur réseau, réinitialise la file locale."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleClearQueue}
+            className="px-3 py-1.5 rounded-xl bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-black transition active:scale-95 cursor-pointer shrink-0"
+          >
+            Vider la file
+          </button>
+        </div>
+
+        {/* BLOC 1: PROFIL PATRON (Photo profil + Nom patron -> 1 seul bouton Modifier au bas du bloc) */}
         <div className="p-3.5 sm:p-4 rounded-2xl bg-blue-50/60 border border-blue-200 space-y-3">
           <div className="flex items-center gap-2">
             <User className="w-4 h-4 text-blue-600" />
             <h4 className="font-black text-xs sm:text-sm text-gray-900">Mon profil (Patron)</h4>
           </div>
 
-          {/* Photo profil patron avec les 2 boutons côte à côte réactifs Android */}
+          {/* Photo profil patron avec boutons Caméra / Galerie */}
           <div className="flex items-center gap-3 py-1">
             <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-blue-100 flex items-center justify-center overflow-hidden border-2 border-blue-300 shrink-0">
               {patronPhotoUrl ? (
@@ -993,35 +980,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          <form onSubmit={handleUpdatePatronNom} className="space-y-1.5">
+          <div className="space-y-1.5">
             <label className="block text-xs font-bold text-gray-600">Nom du patron :</label>
-            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-              <input
-                type="text"
-                required
-                value={patronNom}
-                onChange={(e) => setPatronNom(e.target.value)}
-                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-blue-600 shadow-xs"
-              />
-              <button
-                type="submit"
-                disabled={isSavingPatronNom}
-                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-xs shadow-xs transition cursor-pointer shrink-0"
-              >
-                {isSavingPatronNom ? '...' : 'Modifier'}
-              </button>
-            </div>
-            {patronNomFeedback && (
-              <p className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+            <input
+              type="text"
+              required
+              value={patronNom}
+              onChange={(e) => setPatronNom(e.target.value)}
+              className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-blue-600 shadow-xs"
+            />
+          </div>
+
+          {/* 1 SEUL BOUTON MODIFIER EN BAS DU BLOC 1 */}
+          <div className="pt-1 space-y-1.5">
+            <button
+              type="button"
+              onClick={handleSaveProfilPatron}
+              disabled={isSavingProfilPatron}
+              className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-98 text-white font-black text-xs sm:text-sm shadow-xs transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Check className="w-4 h-4 stroke-[2.5]" />
+              <span>{isSavingProfilPatron ? 'Modification en cours...' : 'Modifier'}</span>
+            </button>
+            {profilPatronFeedback && (
+              <p className="text-xs font-bold text-emerald-600 flex items-center justify-center gap-1">
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
-                <span>{patronNomFeedback}</span>
+                <span>{profilPatronFeedback}</span>
               </p>
             )}
-          </form>
+          </div>
         </div>
 
-        {/* MODIF 6: SECTION MA BOUTIQUE */}
-        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-4">
+        {/* BLOC 2: MA BOUTIQUE (Photo devanture + Nom boutique + Adresse -> 1 seul bouton Modifier au bas du bloc) */}
+        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-3.5">
           <div className="flex items-center gap-2">
             <Store className="w-4 h-4 text-indigo-600" />
             <h4 className="font-black text-xs sm:text-sm text-gray-900">Ma boutique (Principale)</h4>
@@ -1070,62 +1061,51 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Formulaire Nom Boutique */}
-          <form onSubmit={handleUpdateBoutiqueNom} className="space-y-1.5">
+          {/* Champ Nom Boutique */}
+          <div className="space-y-1.5">
             <label className="block text-xs font-bold text-gray-600">Nom de la boutique :</label>
-            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-              <input
-                type="text"
-                required
-                value={boutiqueNom}
-                onChange={(e) => setBoutiqueNom(e.target.value)}
-                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
-              />
-              <button
-                type="submit"
-                disabled={isSavingBoutiqueNom}
-                className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-xs shadow-xs transition cursor-pointer shrink-0"
-              >
-                {isSavingBoutiqueNom ? '...' : 'Modifier'}
-              </button>
-            </div>
-            {boutiqueNomFeedback && (
-              <p className="text-xs font-bold text-emerald-600 flex items-center gap-1">
-                <Check className="w-3.5 h-3.5 stroke-[3]" />
-                <span>{boutiqueNomFeedback}</span>
-              </p>
-            )}
-          </form>
+            <input
+              type="text"
+              required
+              value={boutiqueNom}
+              onChange={(e) => setBoutiqueNom(e.target.value)}
+              className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
+            />
+          </div>
 
-          {/* Formulaire Adresse Boutique */}
-          <form onSubmit={handleUpdateBoutiqueAdresse} className="space-y-1.5 pt-1 border-t border-indigo-100">
+          {/* Champ Adresse Boutique */}
+          <div className="space-y-1.5 pt-1 border-t border-indigo-100">
             <label className="block text-xs font-bold text-gray-600 flex items-center gap-1">
               <MapPin className="w-3.5 h-3.5 text-indigo-500" />
               <span>Adresse / Quartier de la boutique :</span>
             </label>
-            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-              <input
-                type="text"
-                value={boutiqueAdresse}
-                onChange={(e) => setBoutiqueAdresse(e.target.value)}
-                placeholder="Ex: Marché de Lomé, Assigamé"
-                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
-              />
-              <button
-                type="submit"
-                disabled={isSavingBoutiqueAdresse}
-                className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-xs shadow-xs transition cursor-pointer shrink-0"
-              >
-                {isSavingBoutiqueAdresse ? '...' : 'Enregistrer'}
-              </button>
-            </div>
-            {boutiqueAdresseFeedback && (
-              <p className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+            <input
+              type="text"
+              value={boutiqueAdresse}
+              onChange={(e) => setBoutiqueAdresse(e.target.value)}
+              placeholder="Ex: Marché de Lomé, Assigamé"
+              className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
+            />
+          </div>
+
+          {/* 1 SEUL BOUTON MODIFIER EN BAS DU BLOC 2 */}
+          <div className="pt-1 space-y-1.5">
+            <button
+              type="button"
+              onClick={handleSaveBoutiqueBloc}
+              disabled={isSavingBoutiqueBloc}
+              className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-98 text-white font-black text-xs sm:text-sm shadow-xs transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Check className="w-4 h-4 stroke-[2.5]" />
+              <span>{isSavingBoutiqueBloc ? 'Modification en cours...' : 'Modifier'}</span>
+            </button>
+            {boutiqueBlocFeedback && (
+              <p className="text-xs font-bold text-emerald-600 flex items-center justify-center gap-1">
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
-                <span>{boutiqueAdresseFeedback}</span>
+                <span>{boutiqueBlocFeedback}</span>
               </p>
             )}
-          </form>
+          </div>
         </div>
 
         {/* MODIF 6: SECTION EMPLOYÉS */}

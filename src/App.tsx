@@ -48,6 +48,7 @@ import { withTimeout } from './lib/supabaseHelper';
 import CheckAbonnement from './components/CheckAbonnement';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
 import { getCurrentBoutiqueId, getActiveBoutiqueId, boutiqueToPatron } from './lib/deviceAuth';
+import { generatePrefixedId } from './lib/uuid';
 import { SuperAdminScreen } from './components/SuperAdminScreen';
 import EfaAdmin from './pages/EfaAdmin';
 import { MonAbonnementModal } from './components/MonAbonnementModal';
@@ -1074,7 +1075,8 @@ export default function App() {
     try {
       if (action.type === 'vente') {
         const saleData = action.data;
-        const saleId = 'vente-vocal-' + Date.now();
+        // RÈGLE : ID unique neuf avec crypto.randomUUID()
+        const saleId = generatePrefixedId('vte');
         const nowIso = new Date().toISOString();
         const saleRecord: Vente = { id: saleId, patron_id: patron.id, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: true };
 
@@ -1084,9 +1086,12 @@ export default function App() {
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase.from('produits').update({ stock_qte: newStock }).eq('id', saleData.produit_id);
-            await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
+            const resVente = await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
+            if (resVente?.status === 409 || resVente?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'ventes', saleId);
+            }
             try {
-              await supabase.from('transactions').upsert([{
+              const resTx = await supabase.from('transactions').upsert([{
                 id: saleId,
                 ticket_id: saleId,
                 patron_id: patron.id,
@@ -1103,6 +1108,9 @@ export default function App() {
                 vendu_par_nom: currentUser.nom,
                 date: nowIso,
               }], { onConflict: 'id' });
+              if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'transactions', saleId);
+              }
             } catch {
               // Ignore transaction mirror failure
             }
@@ -1116,11 +1124,15 @@ export default function App() {
           await db.produits.update(currentProd.id, { stock_qte: newStock });
         }
         if (saleData.est_credit) {
-          const creditId = 'credit-vocal-' + Date.now();
+          // RÈGLE : ID unique neuf avec crypto.randomUUID()
+          const creditId = generatePrefixedId('crd');
           const creditRecord: Credit = { id: creditId, patron_id: patron.id, boutique_id: activeBoutiqueId, client_nom: saleData.client_nom || 'Client crédit', montant_initial: saleData.montant_total, reste_a_payer: saleData.reste_a_payer, dernier_paiement: nowIso, synced: true };
           if (typeof navigator !== 'undefined' && navigator.onLine) {
             try {
-              await supabase.from('credits').upsert([creditRecord], { onConflict: 'id' });
+              const resCred = await supabase.from('credits').upsert([creditRecord], { onConflict: 'id' });
+              if (resCred?.status === 409 || resCred?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'credits', creditId);
+              }
             } catch {
               // ignore
             }
@@ -1131,13 +1143,17 @@ export default function App() {
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'depense') {
         const depData = action.data;
-        const depId = 'dep-vocal-' + Date.now();
+        // RÈGLE : ID unique neuf avec crypto.randomUUID()
+        const depId = generatePrefixedId('dep');
         const depRecord: Depense = { id: depId, patron_id: patron.id, boutique_id: activeBoutiqueId, type: depData.type, montant: depData.montant, description: depData.description, cree_par: currentUser.nom, date: new Date().toISOString(), synced: true };
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            await supabase.from('depenses').upsert([depRecord], { onConflict: 'id' });
+            const resDep = await supabase.from('depenses').upsert([depRecord], { onConflict: 'id' });
+            if (resDep?.status === 409 || resDep?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'depenses', depId);
+            }
             try {
-              await supabase.from('transactions').upsert([{
+              const resTx = await supabase.from('transactions').upsert([{
                 id: depId,
                 ticket_id: depId,
                 patron_id: patron.id,
