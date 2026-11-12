@@ -5,6 +5,7 @@ import { isSubscriptionExpired } from './checkLimits';
 import { verifyPin } from './security';
 import type { Patron, Produit, Employe } from './types';
 import { boutiqueToPatron, getActiveBoutiqueId } from './deviceAuth';
+import { ensurePatronExistsInSupabase } from './supabaseHelper';
 
 export { getActiveBoutiqueId };
 
@@ -104,6 +105,8 @@ export async function getOwnerStores(ownerOrAnyStoreId: string): Promise<Patron[
             const isSub = b.id !== mainStoreId;
             mapped.type = isSub ? 'SUB' : 'MAIN';
             mapped.parentId = isSub ? mainStoreId : null;
+            mapped.ownerId = mainStoreId;
+            mapped.patron_id = mainStoreId;
             mapped.isProActive = b.plan === 'pro';
             mapped.maxBoutiques = PRO_MAX_BOUTIQUES;
             await db.patrons.put(mapped);
@@ -273,6 +276,8 @@ export async function createSubBoutique({
 
     // 1. Synchronisation obligatoire avec Supabase table 'boutiques' (Règle d'or: bloque si échec)
     if (typeof navigator !== 'undefined' && navigator.onLine) {
+      await ensurePatronExistsInSupabase(mainStoreId, mainPatron);
+
       const { error: insertErr } = await supabase.from('boutiques').insert({
         id: subId,
         nom_boutique: finalNom,
@@ -307,7 +312,7 @@ export async function createSubBoutique({
       }
 
       try {
-        await supabase.from('patrons').insert({
+        await supabase.from('patrons').upsert({
           id: subId,
           nom: mainPatron.nom,
           nom_boutique: finalNom,
@@ -318,7 +323,7 @@ export async function createSubBoutique({
           subscription_status: 'pro',
           is_active: true,
           created_at: nowIso,
-        } as any);
+        } as any, { onConflict: 'id' });
       } catch {}
     }
 
@@ -328,6 +333,7 @@ export async function createSubBoutique({
       nom_boutique: finalNom,
       parentId: mainStoreId,
       ownerId: mainStoreId,
+      patron_id: mainStoreId,
       type: 'SUB',
       subscription_status: 'pro',
       current_plan: 'pro',

@@ -51,6 +51,7 @@ export interface Patron {
   type?: 'MAIN' | 'SUB'; // MAIN = boutique principale, SUB = sous-boutique
   maxBoutiques?: number; // max boutiques permises (default 3 pour Pro)
   ownerId?: string; // ID du patron propriétaire
+  patron_id?: string; // ID du patron principal en base
   isSubOfPro?: boolean; // Boutique 2 ou 3 rattachée à un compte PRO
   subBadgeText?: string; // "PRO - Incluse dans Principale"
   solde?: number; // Solde net caisse persistant Supabase
@@ -156,6 +157,8 @@ export interface Credit {
   sale_id?: string;
   client_nom: string;
   montant_initial: number;
+  montant_total?: number;
+  montant_paye?: number;
   reste_a_payer: number;
   telephone?: string;
   dernier_paiement?: string;

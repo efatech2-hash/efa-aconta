@@ -140,6 +140,17 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
   const isPopulaire = !isPro && (rawPlan === 'populaire' || rawPlan.includes('populaire'));
   const effectiveStatus = isPro ? 'pro' : (isPopulaire ? 'populaire' : (rawPlan === 'essai' ? 'trial' : (rawPlan || 'trial')));
 
+  const rawPatronId = (b as any).patron_id;
+  const isSub = Boolean(
+    (rawPatronId && rawPatronId !== b.id) ||
+    (b as any).type === 'SUB' ||
+    (typeof b.id === 'string' && b.id.startsWith('btq_sub_'))
+  );
+  const resolvedParentId = isSub
+    ? (rawPatronId && rawPatronId !== b.id ? rawPatronId : ((b as any).parentId || (b as any).ownerId || null))
+    : null;
+  const resolvedOwnerId = resolvedParentId || b.id;
+
   return {
     id: b.id,
     nom: (b as any).proprietaire || b.nom_patron || b.nom_affichage || (b as any).nom || 'Patron',
@@ -156,6 +167,10 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
     pin_hash: b.pin_patron_hash || (b as any).pin_hash,
     genre: (b as any).genre === 'homme' ? 'homme' : 'femme',
     role: 'patron',
+    parentId: resolvedParentId,
+    ownerId: resolvedOwnerId,
+    patron_id: resolvedOwnerId,
+    type: isSub ? 'SUB' : 'MAIN',
     abonnement_expire: finAbonnement,
     subscription_status: effectiveStatus,
     current_plan: isPro ? 'pro' : effectiveStatus,

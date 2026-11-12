@@ -29,6 +29,11 @@ import { isBoutiquePro } from '../lib/checkLimits';
 import { supabase } from '../lib/supabase';
 import { getActiveBoutiqueId } from '../lib/deviceAuth';
 import { generatePrefixedId } from '../lib/uuid';
+import {
+  ensurePatronExistsInSupabase,
+  resolveMainPatronId,
+  buildCreditSupabasePayload,
+} from '../lib/supabaseHelper';
 
 interface VendreScreenProps {
   patron: Patron;
@@ -295,8 +300,15 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
     const nowIso = new Date().toISOString();
     const parsedReste = creditMode ? parseInt(resteAPayer, 10) || totalGeneral : 0;
 
-    // RÈGLE : patron.id = ID boutique principale (btq_...). Pour Boutique 2, activeBoutiqueId = btq_sub_...
+    // RÈGLE 1 & 3 : patron_id = patron principal (Boutique 1), boutique_id = boutique active (btq_... ou btq_sub_...)
     const activeBoutiqueId = getActiveBoutiqueId(patron);
+    const mainPatronId = (await resolveMainPatronId(patron)) || patron.id;
+    const isOnlineGlobal = typeof navigator !== 'undefined' && navigator.onLine;
+
+    if (isOnlineGlobal) {
+      // RÈGLE 2 : Vérifier / upsert patron principal dans `patrons` avant toute écriture
+      await ensurePatronExistsInSupabase(mainPatronId, patron);
+    }
 
     try {
       // 1. Sauvegarder chaque ligne de vente et décrémenter les stocks directement dans Supabase & local
@@ -308,7 +320,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         const saleRecord = {
           id: venteId,
           ticket_id: ticketId,
-          patron_id: patron.id,
+          patron_id: mainPatronId,
           boutique_id: activeBoutiqueId,
           produit_id: item.produit_id,
           produit_nom: item.produit_nom,
@@ -336,7 +348,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         const rowVente = {
           id: venteId,
           ticket_id: ticketId,
-          patron_id: patron.id,
+          patron_id: mainPatronId,
           boutique_id: activeBoutiqueId,
           produit_id: item.produit_id,
           produit_nom: item.produit_nom,
@@ -357,7 +369,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         const rowTransaction = {
           id: venteId,
           ticket_id: ticketId,
-          patron_id: patron.id,
+          patron_id: mainPatronId,
           boutique_id: activeBoutiqueId,
           produit_id: item.produit_id,
           produit_nom: item.produit_nom,
@@ -419,18 +431,33 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         await db.produits.update(item.produit_id, { stock_qte: newStock });
       }
 
-      // 2. Si crédit / reste à payer > 0, enregistrer dans la table credits avec boutique_id active
+      // 2. Si crédit / reste à payer > 0, enregistrer dans la table credits avec boutique_id active et patron_id principal
       if (creditMode && parsedReste > 0) {
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const creditId = generatePrefixedId('crd');
         const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
+        const montantPayeInitial = Math.max(0, totalGeneral - parsedReste);
+
+        const supabaseCreditPayload = buildCreditSupabasePayload({
+          id: creditId,
+          patron_id: mainPatronId,
+          boutique_id: activeBoutiqueId,
+          client_nom: clientNom.trim() || 'Sans nom',
+          montant_total: totalGeneral,
+          montant_paye: montantPayeInitial,
+          reste_a_payer: parsedReste,
+          dernier_paiement: nowIso,
+        });
+
         const creditRecord: Credit = {
           id: creditId,
           sale_id: ticketId,
-          patron_id: patron.id,
+          patron_id: mainPatronId,
           boutique_id: activeBoutiqueId,
           client_nom: clientNom.trim() || 'Sans nom',
           montant_initial: totalGeneral,
+          montant_total: totalGeneral,
+          montant_paye: montantPayeInitial,
           reste_a_payer: parsedReste,
           telephone: '',
           dernier_paiement: nowIso,
@@ -444,13 +471,15 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           try {
             const resCred: any = await supabase
               .from('credits')
-              .upsert(creditRecord, { onConflict: 'id' });
+              .upsert(supabaseCreditPayload, { onConflict: 'id' });
             const isCredSuccess = !resCred?.error || resCred?.status === 409 || resCred?.error?.code === '23505';
             if (isCredSuccess) {
               creditOnlineSaved = true;
               if (resCred?.status === 409 || resCred?.error?.code === '23505') {
                 console.log('[Sync 409 Déjà présent]', 'credits', creditId);
               }
+            } else {
+              console.warn('[VendreScreen] Erreur upsert credits:', resCred?.error);
             }
           } catch (cErr) {
             console.warn('[VendreScreen] Note crédit Supabase:', cErr);
@@ -459,7 +488,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
 
         if (!creditOnlineSaved) {
           creditRecord.synced = false;
-          await queueSyncItem('credits', 'insert', creditId, creditRecord);
+          await queueSyncItem('credits', 'insert', creditId, supabaseCreditPayload);
         } else {
           creditRecord.synced = true;
         }
@@ -493,12 +522,12 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
             await supabase.from('patrons').update({ solde: finalNewSolde }).eq('id', activeBoutiqueId);
 
             // Si boutique active est une sous-boutique, mettre également à jour la boutique principale
-            if (patron.id && patron.id !== activeBoutiqueId) {
+            if (mainPatronId && mainPatronId !== activeBoutiqueId) {
               try {
-                const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+                const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', mainPatronId).maybeSingle();
                 const mainSolde = (Number(mainBtq?.solde) || 0) + montantEntreEnCaisse;
-                await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
-                await supabase.from('patrons').update({ solde: mainSolde }).eq('id', patron.id);
+                await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', mainPatronId);
+                await supabase.from('patrons').update({ solde: mainSolde }).eq('id', mainPatronId);
               } catch {}
             }
           } catch (sErr) {
@@ -517,7 +546,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         : `Vente panier (${cart.map((c) => `${c.qte}x ${c.produit_nom}`).join(', ')}) total ${totalGeneral}F par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`;
 
       await logAction({
-        patron_id: patron.id,
+        patron_id: mainPatronId,
         boutique_id: activeBoutiqueId,
         user_id: currentUser.id,
         employe_id: currentUser.role === 'patron' ? null : currentUser.id,

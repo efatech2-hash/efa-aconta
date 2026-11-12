@@ -96,9 +96,9 @@ export const MesBoutiquesScreen: React.FC<MesBoutiquesScreenProps> = ({
       // Calcul des stats par boutique
       const statsMap: Record<string, { articles: number; employes: number }> = {};
       for (const st of ownerStores) {
-        const artCount = allProds.filter((p) => p.patron_id === st.id).length;
+        const artCount = allProds.filter((p) => (p.boutique_id ? p.boutique_id === st.id : p.patron_id === st.id)).length;
         const empCount = allEmps.filter(
-          (e) => e.patron_id === st.id && e.status !== 'deleted' && !e.is_deleted
+          (e) => (e.boutique_id ? e.boutique_id === st.id : e.patron_id === st.id) && e.status !== 'deleted' && !e.is_deleted
         ).length;
         statsMap[st.id] = { articles: artCount, employes: empCount };
       }

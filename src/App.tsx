@@ -44,7 +44,13 @@ import { speakFrench } from './lib/speech';
 import { supabase } from './lib/supabase';
 import { getIsPickingPhoto } from './lib/camera';
 import { App as CapacitorApp } from '@capacitor/app';
-import { withTimeout } from './lib/supabaseHelper';
+import {
+  withTimeout,
+  ensurePatronExistsInSupabase,
+  resolveMainPatronId,
+  buildCreditSupabasePayload,
+  buildDepenseSupabasePayload,
+} from './lib/supabaseHelper';
 import CheckAbonnement from './components/CheckAbonnement';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
 import { getCurrentBoutiqueId, getActiveBoutiqueId, boutiqueToPatron } from './lib/deviceAuth';
@@ -400,9 +406,15 @@ export default function App() {
 
             const converted = boutiqueToPatron(bDataRecord);
             if (currentPatron) {
+              const resolvedParent = converted.parentId || currentPatron.parentId || null;
+              const resolvedOwner = resolvedParent || converted.ownerId || currentPatron.ownerId || currentPatron.id;
               currentPatron = {
                 ...currentPatron,
                 ...converted,
+                parentId: resolvedParent,
+                ownerId: resolvedOwner,
+                patron_id: resolvedOwner,
+                type: converted.type || (resolvedParent ? 'SUB' : currentPatron.type),
                 photo_url: bDataRecord.photo_url || bDataRecord.photo_profil || currentPatron.photo_url || converted.photo_url,
                 photo_devanture: bDataRecord.photo_devanture || bDataRecord.devanture_url || currentPatron.photo_devanture || converted.photo_devanture,
                 adresse: bDataRecord.adresse || bDataRecord.adresse_boutique || currentPatron.adresse || converted.adresse,
@@ -567,6 +579,8 @@ export default function App() {
                   currentPatron.isProActive = true;
                   currentPatron.type = 'SUB';
                   currentPatron.parentId = mainSibling.id;
+                  currentPatron.ownerId = mainSibling.id;
+                  currentPatron.patron_id = mainSibling.id;
                   currentPatron.isSubOfPro = true;
                   currentPatron.subBadgeText = 'PRO - Incluse dans Principale';
                   currentPatron.subscription_end_date = mainSibling.subscription_end_date || mainSibling.subscription_end;
@@ -578,7 +592,9 @@ export default function App() {
               }
             }
 
-            // Détermine le filtre Supabase par boutique active
+            const resolvedMainPatronId = getMainStoreId(currentPatron);
+
+            // Détermine le filtre Supabase par boutique active pour produits & employés
             const btqFilter = currentBoutiqueId && currentBoutiqueId !== currentPatron.id
               ? `boutique_id.eq.${currentBoutiqueId}`
               : `boutique_id.eq.${currentPatron.id},and(boutique_id.is.null,patron_id.eq.${currentPatron.id})`;
@@ -594,8 +610,8 @@ export default function App() {
               await db.produits.bulkPut(
                 remoteProds.map((p) => ({
                   id: p.id,
-                  boutique_id: currentBoutiqueId,
-                  patron_id: currentPatron.id,
+                  boutique_id: p.boutique_id || currentBoutiqueId,
+                  patron_id: p.patron_id || resolvedMainPatronId,
                   nom: p.nom,
                   prix_achat: Number(p.prix_achat) || 0,
                   prix_vente: Number(p.prix_vente) || 0,
@@ -618,8 +634,8 @@ export default function App() {
               await db.employes.bulkPut(
                 remoteEmps.map((e) => ({
                   id: e.id,
-                  boutique_id: currentBoutiqueId,
-                  patron_id: currentPatron.id,
+                  boutique_id: e.boutique_id || currentBoutiqueId,
+                  patron_id: e.patron_id || resolvedMainPatronId,
                   nom: e.nom,
                   role: (e.role as any) || 'vendeuse',
                   telephone: e.telephone || '',
@@ -640,13 +656,14 @@ export default function App() {
             }
 
             // D. Rechargement des ventes depuis Supabase (table 'ventes' ET 'transactions')
-            let fetchedVentesMap = new Map<string, any>();
+            // RÈGLE 3 : Toujours filtrer avec .eq('boutique_id', currentBoutiqueId)
+            const fetchedVentesMap = new Map<string, any>();
 
             try {
               const { data: remoteVentes } = await supabase
                 .from('ventes')
                 .select('*')
-                .or(btqFilter);
+                .eq('boutique_id', currentBoutiqueId);
               if (remoteVentes && remoteVentes.length > 0) {
                 for (const v of remoteVentes) {
                   fetchedVentesMap.set(v.id, v);
@@ -661,7 +678,7 @@ export default function App() {
               const { data: remoteTrans } = await supabase
                 .from('transactions')
                 .select('*')
-                .or(btqFilter);
+                .eq('boutique_id', currentBoutiqueId);
               if (remoteTrans && remoteTrans.length > 0) {
                 for (const t of remoteTrans) {
                   if (!fetchedVentesMap.has(t.id)) {
@@ -675,18 +692,20 @@ export default function App() {
 
             // RÈGLE CRUCIALE 2 : NE JAMAIS ÉCRASER LE CACHE LOCAL PAR SUPABASE VIDE
             if (fetchedVentesMap.size > 0) {
-              // Récupérer les ventes hors-ligne créées localement pas encore synchronisées
+              // Récupérer les ventes hors-ligne créées localement pas encore synchronisées pour cette boutique
               const localUnsynced = await db.ventes
-                .where('patron_id')
-                .equals(currentPatron.id)
-                .filter((v) => v.synced === false)
+                .filter(
+                  (v) =>
+                    v.synced === false &&
+                    (v.boutique_id ? v.boutique_id === currentBoutiqueId : v.patron_id === currentBoutiqueId)
+                )
                 .toArray();
 
               const listToSave: Vente[] = Array.from(fetchedVentesMap.values()).map((v) => ({
                 id: v.id,
                 ticket_id: v.ticket_id || v.id,
-                patron_id: currentPatron.id,
-                boutique_id: currentBoutiqueId,
+                patron_id: v.patron_id || resolvedMainPatronId,
+                boutique_id: v.boutique_id || currentBoutiqueId,
                 produit_id: v.produit_id || '',
                 produit_nom: v.produit_nom || '',
                 qte: Number(v.qte || v.quantite) || 1,
@@ -704,23 +723,30 @@ export default function App() {
               }));
 
               await db.ventes.bulkPut(listToSave);
-              // Ré-insérer les ventes locales non synchronisées
               if (localUnsynced.length > 0) {
                 await db.ventes.bulkPut(localUnsynced);
               }
             }
 
-            // E. Rechargement des dépenses depuis Supabase (sans effacer le cache local si Supabase est vide)
+            // E. Rechargement des dépenses depuis Supabase avec .eq('boutique_id', currentBoutiqueId)
             const { data: remoteDep, error: depErr } = await supabase
               .from('depenses')
               .select('*')
-              .or(btqFilter);
+              .eq('boutique_id', currentBoutiqueId);
             if (!depErr && remoteDep && remoteDep.length > 0) {
+              const localUnsyncedDep = await db.depenses
+                .filter(
+                  (d) =>
+                    d.synced === false &&
+                    (d.boutique_id ? d.boutique_id === currentBoutiqueId : d.patron_id === currentBoutiqueId)
+                )
+                .toArray();
+
               await db.depenses.bulkPut(
                 remoteDep.map((d) => ({
                   id: d.id,
-                  patron_id: currentPatron.id,
-                  boutique_id: currentBoutiqueId,
+                  patron_id: d.patron_id || resolvedMainPatronId,
+                  boutique_id: d.boutique_id || currentBoutiqueId,
                   type: d.type || 'autre',
                   montant: Number(d.montant) || 0,
                   description: d.description || '',
@@ -729,28 +755,52 @@ export default function App() {
                   synced: true,
                 }))
               );
+              if (localUnsyncedDep.length > 0) {
+                await db.depenses.bulkPut(localUnsyncedDep);
+              }
             }
 
-            // F. Rechargement des crédits depuis Supabase (sans effacer le cache local si Supabase est vide)
+            // F. Rechargement des crédits depuis Supabase avec .eq('boutique_id', currentBoutiqueId)
             const { data: remoteCred, error: credErr } = await supabase
               .from('credits')
               .select('*')
-              .or(btqFilter);
+              .eq('boutique_id', currentBoutiqueId);
             if (!credErr && remoteCred && remoteCred.length > 0) {
+              const localUnsyncedCred = await db.credits
+                .filter(
+                  (c) =>
+                    c.synced === false &&
+                    (c.boutique_id ? c.boutique_id === currentBoutiqueId : c.patron_id === currentBoutiqueId)
+                )
+                .toArray();
+
               await db.credits.bulkPut(
-                remoteCred.map((c) => ({
-                  id: c.id,
-                  sale_id: c.sale_id || '',
-                  patron_id: currentPatron.id,
-                  boutique_id: currentBoutiqueId,
-                  client_nom: c.client_nom || '',
-                  montant_initial: Number(c.montant_initial) || 0,
-                  reste_a_payer: Number(c.reste_a_payer) || 0,
-                  telephone: c.telephone || '',
-                  dernier_paiement: c.dernier_paiement || new Date().toISOString(),
-                  synced: true,
-                }))
+                remoteCred.map((c) => {
+                  const totalVal = Number(c.montant_total ?? c.montant_initial ?? c.reste_a_payer) || 0;
+                  const resteVal = Number(c.reste_a_payer) || 0;
+                  const payeVal = Number(c.montant_paye ?? Math.max(0, totalVal - resteVal)) || 0;
+                  const computedStatus = c.status || c.statut || (resteVal <= 0 ? 'payé' : 'en_cours');
+                  return {
+                    id: c.id,
+                    sale_id: c.sale_id || '',
+                    patron_id: c.patron_id || resolvedMainPatronId,
+                    boutique_id: c.boutique_id || currentBoutiqueId,
+                    client_nom: c.client_nom || '',
+                    montant_initial: totalVal,
+                    montant_total: totalVal,
+                    montant_paye: payeVal,
+                    reste_a_payer: resteVal,
+                    telephone: c.telephone || '',
+                    dernier_paiement: c.dernier_paiement || new Date().toISOString(),
+                    status: computedStatus,
+                    statut: computedStatus,
+                    synced: true,
+                  };
+                })
               );
+              if (localUnsyncedCred.length > 0) {
+                await db.credits.bulkPut(localUnsyncedCred);
+              }
             }
           } catch (syncErr) {
             console.warn('[App] Erreur sync entités Supabase:', syncErr);
@@ -774,14 +824,14 @@ export default function App() {
           console.warn('[App] Erreur getOwnerStores:', stErr);
         }
 
-        // Filtrage par boutique courante (currentBoutiqueId)
+        // Filtrage STRICT par boutique courante (currentBoutiqueId) pour éviter tout mélange entre boutiques
         const [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
-          db.employes.filter((e) => e.boutique_id === currentBoutiqueId || e.patron_id === currentBoutiqueId).toArray(),
-          db.produits.filter((p) => p.boutique_id === currentBoutiqueId || p.patron_id === currentBoutiqueId).toArray(),
-          db.ventes.filter((v) => v.boutique_id === currentBoutiqueId || v.patron_id === currentBoutiqueId).toArray(),
-          db.depenses.filter((d) => (d as any).boutique_id === currentBoutiqueId || d.patron_id === currentBoutiqueId).toArray(),
-          db.credits.filter((c) => (c as any).boutique_id === currentBoutiqueId || c.patron_id === currentBoutiqueId).toArray(),
-          db.parrainage.where('parrain_id').equals(currentPatron.id).toArray(),
+          db.employes.filter((e) => (e.boutique_id ? e.boutique_id === currentBoutiqueId : e.patron_id === currentBoutiqueId)).toArray(),
+          db.produits.filter((p) => (p.boutique_id ? p.boutique_id === currentBoutiqueId : p.patron_id === currentBoutiqueId)).toArray(),
+          db.ventes.filter((v) => (v.boutique_id ? v.boutique_id === currentBoutiqueId : v.patron_id === currentBoutiqueId)).toArray(),
+          db.depenses.filter((d) => (d.boutique_id ? d.boutique_id === currentBoutiqueId : d.patron_id === currentBoutiqueId)).toArray(),
+          db.credits.filter((c) => (c.boutique_id ? c.boutique_id === currentBoutiqueId : c.patron_id === currentBoutiqueId)).toArray(),
+          db.parrainage.where('parrain_id').equals(getMainStoreId(currentPatron)).toArray(),
         ]);
         setEmployes(empList);
         setProducts(prodList);
@@ -1071,111 +1121,187 @@ export default function App() {
     const action = pendingVoiceAction;
     setPendingVoiceAction(null);
     const activeBoutiqueId = getActiveBoutiqueId(patron);
+    const mainPatronId = (await resolveMainPatronId(patron)) || patron.id;
+    const isOnlineNow = typeof navigator !== 'undefined' && navigator.onLine;
 
     try {
+      if (isOnlineNow && (action.type === 'vente' || action.type === 'depense')) {
+        await ensurePatronExistsInSupabase(mainPatronId, patron);
+      }
+
       if (action.type === 'vente') {
         const saleData = action.data;
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const saleId = generatePrefixedId('vte');
         const nowIso = new Date().toISOString();
-        const saleRecord: Vente = { id: saleId, patron_id: patron.id, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: true };
+        const saleRecord: Vente = { id: saleId, patron_id: mainPatronId, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: isOnlineNow };
 
         const currentProd = products.find((p) => p.id === saleData.produit_id);
         const newStock = Math.max(0, (currentProd?.stock_qte ?? 0) - saleData.qte);
+        const rowTx = {
+          id: saleId,
+          ticket_id: saleId,
+          patron_id: mainPatronId,
+          boutique_id: activeBoutiqueId,
+          produit_id: saleData.produit_id,
+          produit_nom: saleData.produit_nom,
+          qte: saleData.qte,
+          quantite: saleData.qte,
+          montant: saleData.montant_total,
+          montant_total: saleData.montant_total,
+          client_nom: saleData.client_nom,
+          est_credit: saleData.est_credit,
+          type: 'vente',
+          vendu_par_nom: currentUser.nom,
+          date: nowIso,
+        };
 
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
+        let venteSaved = false;
+        if (isOnlineNow) {
           try {
             await supabase.from('produits').update({ stock_qte: newStock }).eq('id', saleData.produit_id);
-            const resVente = await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
+            const resVente: any = await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
             if (resVente?.status === 409 || resVente?.error?.code === '23505') {
               console.log('[Sync 409 Déjà présent]', 'ventes', saleId);
             }
-            try {
-              const resTx = await supabase.from('transactions').upsert([{
-                id: saleId,
-                ticket_id: saleId,
-                patron_id: patron.id,
-                boutique_id: activeBoutiqueId,
-                produit_id: saleData.produit_id,
-                produit_nom: saleData.produit_nom,
-                qte: saleData.qte,
-                quantite: saleData.qte,
-                montant: saleData.montant_total,
-                montant_total: saleData.montant_total,
-                client_nom: saleData.client_nom,
-                est_credit: saleData.est_credit,
-                type: 'vente',
-                vendu_par_nom: currentUser.nom,
-                date: nowIso,
-              }], { onConflict: 'id' });
+            const resTx: any = await supabase.from('transactions').upsert([rowTx], { onConflict: 'id' });
+            if (!resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505') {
+              venteSaved = true;
               if (resTx?.status === 409 || resTx?.error?.code === '23505') {
                 console.log('[Sync 409 Déjà présent]', 'transactions', saleId);
               }
-            } catch {
-              // Ignore transaction mirror failure
             }
           } catch (vErr) {
             console.error('[VoiceSale] Erreur Supabase:', vErr);
           }
         }
 
+        if (!venteSaved) {
+          saleRecord.synced = false;
+          await queueSyncItem('ventes', 'insert', saleId, { ...saleRecord, boutique_id: activeBoutiqueId });
+          await queueSyncItem('transactions', 'insert', saleId, rowTx);
+          await queueSyncItem('produits', 'update', saleData.produit_id, { stock_qte: newStock });
+        }
+
         await db.ventes.put(saleRecord);
         if (currentProd) {
           await db.produits.update(currentProd.id, { stock_qte: newStock });
         }
-        if (saleData.est_credit) {
+        if (saleData.est_credit && (Number(saleData.reste_a_payer) || 0) > 0) {
           // RÈGLE : ID unique neuf avec crypto.randomUUID()
           const creditId = generatePrefixedId('crd');
-          const creditRecord: Credit = { id: creditId, patron_id: patron.id, boutique_id: activeBoutiqueId, client_nom: saleData.client_nom || 'Client crédit', montant_initial: saleData.montant_total, reste_a_payer: saleData.reste_a_payer, dernier_paiement: nowIso, synced: true };
-          if (typeof navigator !== 'undefined' && navigator.onLine) {
+          const resteVal = Number(saleData.reste_a_payer) || 0;
+          const totalVal = Number(saleData.montant_total) || resteVal;
+          const payeVal = Math.max(0, totalVal - resteVal);
+          const supabaseCreditPayload = buildCreditSupabasePayload({
+            id: creditId,
+            patron_id: mainPatronId,
+            boutique_id: activeBoutiqueId,
+            client_nom: saleData.client_nom || 'Client crédit',
+            montant_total: totalVal,
+            montant_paye: payeVal,
+            reste_a_payer: resteVal,
+            dernier_paiement: nowIso,
+          });
+          const creditRecord: Credit = {
+            id: creditId,
+            patron_id: mainPatronId,
+            boutique_id: activeBoutiqueId,
+            client_nom: saleData.client_nom || 'Client crédit',
+            montant_initial: totalVal,
+            montant_total: totalVal,
+            montant_paye: payeVal,
+            reste_a_payer: resteVal,
+            dernier_paiement: nowIso,
+            status: 'en_cours',
+            statut: 'en_cours',
+            synced: isOnlineNow,
+          };
+          let credSaved = false;
+          if (isOnlineNow) {
             try {
-              const resCred = await supabase.from('credits').upsert([creditRecord], { onConflict: 'id' });
-              if (resCred?.status === 409 || resCred?.error?.code === '23505') {
-                console.log('[Sync 409 Déjà présent]', 'credits', creditId);
+              const resCred: any = await supabase.from('credits').upsert([supabaseCreditPayload], { onConflict: 'id' });
+              if (!resCred?.error || resCred?.status === 409 || resCred?.error?.code === '23505') {
+                credSaved = true;
+                if (resCred?.status === 409 || resCred?.error?.code === '23505') {
+                  console.log('[Sync 409 Déjà présent]', 'credits', creditId);
+                }
               }
             } catch {
               // ignore
             }
           }
+          if (!credSaved) {
+            creditRecord.synced = false;
+            await queueSyncItem('credits', 'insert', creditId, supabaseCreditPayload);
+          }
           await db.credits.put(creditRecord);
         }
-        logAction({ patron_id: patron.id, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'vente', description: `Vente vocale ${saleData.qte}x ${saleData.produit_nom} (${saleData.montant_total}F) par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`, montant: saleData.montant_total }).catch(console.error);
+        await logAction({ patron_id: mainPatronId, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'vente', description: `Vente vocale ${saleData.qte}x ${saleData.produit_nom} (${saleData.montant_total}F) par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`, montant: saleData.montant_total }).catch(console.error);
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'depense') {
         const depData = action.data;
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const depId = generatePrefixedId('dep');
-        const depRecord: Depense = { id: depId, patron_id: patron.id, boutique_id: activeBoutiqueId, type: depData.type, montant: depData.montant, description: depData.description, cree_par: currentUser.nom, date: new Date().toISOString(), synced: true };
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const nowIso = new Date().toISOString();
+        const depPayload = buildDepenseSupabasePayload({
+          id: depId,
+          patron_id: mainPatronId,
+          boutique_id: activeBoutiqueId,
+          type: depData.type,
+          montant: depData.montant,
+          description: depData.description,
+          cree_par: currentUser.nom,
+          date: nowIso,
+        });
+        const depRecord: Depense = { id: depId, patron_id: mainPatronId, boutique_id: activeBoutiqueId, type: depData.type, montant: depData.montant, description: depData.description, cree_par: currentUser.nom, date: nowIso, synced: isOnlineNow };
+        const rowTxDep = {
+          id: depId,
+          ticket_id: depId,
+          patron_id: mainPatronId,
+          boutique_id: activeBoutiqueId,
+          produit_id: 'depense',
+          produit_nom: `Dépense: ${depData.type}`,
+          qte: 1,
+          quantite: 1,
+          montant: depData.montant,
+          montant_total: depData.montant,
+          type: 'depense',
+          status: 'active',
+          is_deleted: false,
+          vendu_par_nom: currentUser.nom,
+          date: nowIso,
+        };
+        let depSaved = false;
+        let txSaved = false;
+        if (isOnlineNow) {
           try {
-            const resDep = await supabase.from('depenses').upsert([depRecord], { onConflict: 'id' });
-            if (resDep?.status === 409 || resDep?.error?.code === '23505') {
-              console.log('[Sync 409 Déjà présent]', 'depenses', depId);
+            const resDep: any = await supabase.from('depenses').upsert([depPayload], { onConflict: 'id' });
+            if (!resDep?.error || resDep?.status === 409 || resDep?.error?.code === '23505') {
+              depSaved = true;
+              if (resDep?.status === 409 || resDep?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'depenses', depId);
+              }
             }
             try {
-              const resTx = await supabase.from('transactions').upsert([{
-                id: depId,
-                ticket_id: depId,
-                patron_id: patron.id,
-                boutique_id: activeBoutiqueId,
-                produit_id: 'depense',
-                produit_nom: `Dépense: ${depData.type}`,
-                qte: 1,
-                quantite: 1,
-                montant: depData.montant,
-                montant_total: depData.montant,
-                type: 'depense',
-                status: 'active',
-                is_deleted: false,
-                vendu_par_nom: currentUser.nom,
-                date: depRecord.date,
-              }], { onConflict: 'id' });
+              const resTx: any = await supabase.from('transactions').upsert([rowTxDep], { onConflict: 'id' });
+              if (!resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505') {
+                txSaved = true;
+              }
             } catch {}
           } catch {
             // ignore
           }
         }
+        if (!depSaved) {
+          depRecord.synced = false;
+          await queueSyncItem('depenses', 'insert', depId, depPayload);
+        }
+        if (!txSaved) {
+          await queueSyncItem('transactions', 'insert', depId, rowTxDep);
+        }
         await db.depenses.put(depRecord);
+        await logAction({ patron_id: mainPatronId, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'depense', description: `Dépense vocale ${depData.type}: ${depData.montant}F (${depData.description || 'Sans détail'}) par ${currentUser.nom}`, montant: depData.montant }).catch(console.error);
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'produit') {
         const prodData = action.data;

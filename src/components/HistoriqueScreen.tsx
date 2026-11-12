@@ -24,6 +24,7 @@ import { getHistoriqueActions, formatLocalDate, exportHistoriqueCSV } from '../l
 import { hasAccess } from '../lib/checkLimits';
 import { BoutonRetour } from './BoutonRetour';
 import { supabase } from '../lib/supabase';
+import { getActiveBoutiqueId } from '../lib/deviceAuth';
 
 interface HistoriqueScreenProps {
   patron: Patron;
@@ -47,8 +48,10 @@ export const HistoriqueScreen: React.FC<HistoriqueScreenProps> = ({
   const [selectedPeriod, setSelectedPeriod] = useState<string>('all'); // all, today, 7days, 30days
   const [searchQuery, setSearchQuery] = useState('');
 
+  const activeBoutiqueId = getActiveBoutiqueId(patron);
+
   const loadData = () => {
-    getHistoriqueActions(patron.id).then((list) => {
+    getHistoriqueActions(patron.id, activeBoutiqueId).then((list) => {
       setActions(list);
       setIsLoading(false);
     });
@@ -56,11 +59,12 @@ export const HistoriqueScreen: React.FC<HistoriqueScreenProps> = ({
 
   // Charger les actions depuis Supabase / Dexie et écouter en Realtime
   useEffect(() => {
+    setIsLoading(true);
     loadData();
 
     // Supabase Realtime sur table historique_actions
     const channel = supabase
-      .channel(`historique_realtime_${patron.id}`)
+      .channel(`historique_realtime_${activeBoutiqueId}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'historique_actions' },
@@ -73,7 +77,7 @@ export const HistoriqueScreen: React.FC<HistoriqueScreenProps> = ({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [patron.id]);
+  }, [patron.id, activeBoutiqueId]);
 
   // Filtrage
   const filteredActions = useMemo(() => {

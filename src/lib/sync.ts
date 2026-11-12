@@ -1,6 +1,12 @@
 import { db } from './db';
 import { supabase } from './supabase';
-import { withTimeout } from './supabaseHelper';
+import {
+  withTimeout,
+  ensurePatronExistsInSupabase,
+  clearPatronVerificationCache,
+  buildCreditSupabasePayload,
+  buildDepenseSupabasePayload,
+} from './supabaseHelper';
 
 // Map pour compter le nombre d'échecs par enregistrement (anti-blocage)
 const itemFailCounts = new Map<string, number>();
@@ -161,14 +167,79 @@ export async function processSyncQueue(): Promise<{ syncedCount: number; errors:
       }
 
       try {
+        // RÈGLE 2 : Avant d'insérer dans credits, depenses, historique_actions, ventes, transactions,
+        // vérifier que le patron_id existe dans `patrons` (sinon upsert dans `patrons` d'abord).
+        let payloadData = item.data ? { ...item.data } : {};
+        const tablesNeedingPatron = new Set([
+          'credits',
+          'depenses',
+          'historique_actions',
+          'ventes',
+          'transactions',
+        ]);
+
+        if (item.action !== 'delete' && tablesNeedingPatron.has(item.table_name)) {
+          const rawPatronOrBoutique = payloadData.patron_id || payloadData.boutique_id;
+          if (rawPatronOrBoutique) {
+            const resolvedMainPatronId = await ensurePatronExistsInSupabase(rawPatronOrBoutique);
+            if (resolvedMainPatronId) {
+              payloadData.patron_id = resolvedMainPatronId;
+            }
+          }
+          if (!payloadData.boutique_id && payloadData.patron_id) {
+            payloadData.boutique_id = payloadData.patron_id;
+          }
+
+          // RÈGLE 5 : Respect strict des vrais noms de colonnes par table
+          if (item.table_name === 'credits') {
+            const totalVal = Number(payloadData.montant_total ?? payloadData.montant_initial ?? payloadData.reste_a_payer) || 0;
+            const resteVal = Number(payloadData.reste_a_payer) || 0;
+            const payeVal = Number(payloadData.montant_paye ?? Math.max(0, totalVal - resteVal)) || 0;
+            payloadData = buildCreditSupabasePayload({
+              id: payloadData.id || item.record_id,
+              patron_id: payloadData.patron_id || payloadData.boutique_id || '',
+              boutique_id: payloadData.boutique_id || payloadData.patron_id || '',
+              client_nom: payloadData.client_nom || 'Sans nom',
+              montant_total: totalVal,
+              montant_paye: payeVal,
+              reste_a_payer: resteVal,
+              dernier_paiement: payloadData.dernier_paiement,
+            });
+          } else if (item.table_name === 'depenses') {
+            payloadData = buildDepenseSupabasePayload({
+              id: payloadData.id || item.record_id,
+              patron_id: payloadData.patron_id || payloadData.boutique_id || '',
+              boutique_id: payloadData.boutique_id || payloadData.patron_id || '',
+              type: payloadData.type || 'autre',
+              montant: Number(payloadData.montant) || 0,
+              description: payloadData.description || '',
+              cree_par: payloadData.cree_par || 'Patron',
+              date: payloadData.date,
+            });
+          } else if (item.table_name === 'historique_actions') {
+            payloadData = {
+              id: payloadData.id || item.record_id,
+              user_id: payloadData.user_id || payloadData.patron_id,
+              patron_id: payloadData.patron_id || payloadData.boutique_id || '',
+              boutique_id: payloadData.boutique_id || payloadData.patron_id || '',
+              employe_id: payloadData.employe_id ?? null,
+              employe_nom: payloadData.employe_nom ?? null,
+              action_type: payloadData.action_type || 'vente',
+              description: payloadData.description || '',
+              montant: payloadData.montant ?? null,
+              created_at: payloadData.created_at || new Date().toISOString(),
+            };
+          }
+        }
+
         const table = supabase.from(item.table_name);
         let queryPromise: any;
 
-        if (item.action === 'insert') {
-          // RÈGLE 1 & 2 : Toujours .upsert(data, { onConflict: 'id' })
-          queryPromise = table.upsert(item.data, { onConflict: 'id' });
+        if (item.action === 'insert' || (item.action === 'update' && item.table_name === 'credits')) {
+          // RÈGLE 4 : Toujours .upsert(data, { onConflict: 'id' })
+          queryPromise = table.upsert(payloadData, { onConflict: 'id' });
         } else if (item.action === 'update') {
-          queryPromise = table.update(item.data).eq('id', item.record_id);
+          queryPromise = table.update(payloadData).eq('id', item.record_id);
         } else if (item.action === 'delete') {
           queryPromise = table.delete().eq('id', item.record_id);
         } else {
@@ -183,9 +254,9 @@ export async function processSyncQueue(): Promise<{ syncedCount: number; errors:
           // Log explicite pour debug
           console.log('[Sync 409 Déjà présent]', item.table_name, item.record_id);
           // Si 409 / code 23505 : la ligne existe déjà en base, tenter update ou ignorer le doublon
-          if (item.action === 'insert' && item.data) {
+          if (item.action === 'insert' && payloadData) {
             try {
-              await withTimeout(table.update(item.data).eq('id', item.record_id), 3000);
+              await withTimeout(table.update(payloadData).eq('id', item.record_id), 3000);
             } catch {}
           }
           // Retirer l'item de la file et marquer localement comme synchronisé
@@ -199,6 +270,10 @@ export async function processSyncQueue(): Promise<{ syncedCount: number; errors:
           itemFailCounts.delete(itemKey);
           syncedCount++;
         } else {
+          // Si erreur FK 23503, invalider le cache de vérification patron pour la prochaine tentative
+          if (res?.error?.code === '23503' && payloadData?.patron_id) {
+            clearPatronVerificationCache(payloadData.patron_id);
+          }
           // Échec réel
           const fails = previousFails + 1;
           itemFailCounts.set(itemKey, fails);

@@ -25,6 +25,13 @@ import { BoutonRetour } from './BoutonRetour';
 import { supabase } from '../lib/supabase';
 import { getActiveBoutiqueId } from '../lib/deviceAuth';
 import { generatePrefixedId } from '../lib/uuid';
+import {
+  ensurePatronExistsInSupabase,
+  resolveMainPatronId,
+  buildCreditSupabasePayload,
+  buildDepenseSupabasePayload,
+} from '../lib/supabaseHelper';
+import { getMainStoreId } from '../lib/mesBoutiques';
 
 interface MonArgentScreenProps {
   patron: Patron;
@@ -71,13 +78,17 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     typeof patron.solde === 'number' ? patron.solde : null
   );
 
+  const activeBoutiqueId = getActiveBoutiqueId(patron);
+  const mainStoreId = getMainStoreId(patron);
+
   const fetchRemoteSolde = async () => {
+    const targetStoreId = getActiveBoutiqueId(patron);
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const { data: btq } = await supabase
           .from('boutiques')
           .select('solde')
-          .eq('id', patron.id)
+          .eq('id', targetStoreId)
           .maybeSingle();
         if (btq && typeof btq.solde === 'number') {
           setRemoteSolde(btq.solde);
@@ -88,7 +99,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         const { data: p } = await supabase
           .from('patrons')
           .select('solde')
-          .eq('id', patron.id)
+          .eq('id', targetStoreId)
           .maybeSingle();
         if (p && typeof p.solde === 'number') {
           setRemoteSolde(p.solde);
@@ -142,32 +153,32 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     }
   }
 
-  // Lecture directe depuis Supabase (table 'ventes' ET 'transactions')
+  // Lecture directe depuis Supabase filtrée STRICTEMENT par boutique_id de la boutique active
   const fetchRemoteData = async () => {
     if (typeof navigator === 'undefined' || !navigator.onLine) return;
     try {
-      const activeBoutiqueId = getActiveBoutiqueId(patron);
-      const orClause = activeBoutiqueId && activeBoutiqueId !== patron.id
-        ? `boutique_id.eq.${activeBoutiqueId}`
-        : `boutique_id.eq.${patron.id},patron_id.eq.${patron.id}`;
+      const currentBtqId = getActiveBoutiqueId(patron);
+      const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
 
-      // 1. Lire les ventes depuis Supabase (table 'ventes' ET 'transactions')
+      // 1. Lire les ventes depuis Supabase (table 'ventes' ET 'transactions') avec .eq('boutique_id', currentBtqId)
       const fetchedVentesMap = new Map<string, Vente>();
+      let ventesQueryOk = false;
 
       try {
-        const { data: vData } = await supabase
+        const { data: vData, error: vErr } = await supabase
           .from('ventes')
           .select('*')
-          .or(orClause)
+          .eq('boutique_id', currentBtqId)
           .order('date', { ascending: false });
 
-        if (vData && vData.length > 0) {
+        if (!vErr && Array.isArray(vData)) {
+          ventesQueryOk = true;
           for (const v of vData) {
             fetchedVentesMap.set(v.id, {
               id: v.id,
               ticket_id: v.ticket_id || v.id,
-              patron_id: v.patron_id || patron.id,
-              boutique_id: v.boutique_id || activeBoutiqueId,
+              patron_id: v.patron_id || resolvedMainId,
+              boutique_id: v.boutique_id || currentBtqId,
               produit_id: v.produit_id || '',
               produit_nom: v.produit_nom || '',
               qte: Number(v.qte) || 1,
@@ -191,20 +202,21 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
       // Compléter avec la table 'transactions'
       try {
-        const { data: tData } = await supabase
+        const { data: tData, error: tErr } = await supabase
           .from('transactions')
           .select('*')
-          .or(orClause)
+          .eq('boutique_id', currentBtqId)
           .order('date', { ascending: false });
 
-        if (tData && tData.length > 0) {
+        if (!tErr && Array.isArray(tData)) {
+          ventesQueryOk = true;
           for (const t of tData) {
             if (!fetchedVentesMap.has(t.id)) {
               fetchedVentesMap.set(t.id, {
                 id: t.id,
                 ticket_id: t.ticket_id || t.id,
-                patron_id: t.patron_id || patron.id,
-                boutique_id: t.boutique_id || activeBoutiqueId,
+                patron_id: t.patron_id || resolvedMainId,
+                boutique_id: t.boutique_id || currentBtqId,
                 produit_id: t.produit_id || '',
                 produit_nom: t.produit_nom || '',
                 qte: Number(t.qte || t.quantite) || 1,
@@ -227,61 +239,88 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         console.warn('[MonArgent] Erreur fetch table transactions:', err);
       }
 
-      // RÈGLE CRUCIALE 2 : "Ne jamais écraser cache local par Supabase vide. Afficher cache d'abord, puis remplacer seulement si Supabase renvoie données."
-      if (fetchedVentesMap.size > 0) {
+      if (ventesQueryOk) {
+        const localUnsyncedVentes = ventes.filter(
+          (v) => v.synced === false && (v.boutique_id ? v.boutique_id === currentBtqId : v.patron_id === currentBtqId)
+        );
+        for (const lv of localUnsyncedVentes) {
+          if (!fetchedVentesMap.has(lv.id)) fetchedVentesMap.set(lv.id, lv);
+        }
         setRemoteVentes(Array.from(fetchedVentesMap.values()));
       }
 
-      // 2. Lire les crédits depuis Supabase
+      // 2. Lire les crédits depuis Supabase avec .eq('boutique_id', currentBtqId)
       try {
-        const { data: cData } = await supabase
+        const { data: cData, error: cErr } = await supabase
           .from('credits')
           .select('*')
-          .or(orClause)
+          .eq('boutique_id', currentBtqId)
           .order('dernier_paiement', { ascending: false });
 
-        if (cData && cData.length > 0) {
-          setRemoteCredits(
-            cData.map((c) => ({
+        if (!cErr && Array.isArray(cData)) {
+          const mappedCredits: Credit[] = cData.map((c) => {
+            const totalVal = Number(c.montant_total ?? c.montant_initial ?? c.reste_a_payer) || 0;
+            const resteVal = Number(c.reste_a_payer) || 0;
+            const payeVal = Number(c.montant_paye ?? Math.max(0, totalVal - resteVal)) || 0;
+            const computedStatus = c.status || c.statut || (resteVal <= 0 ? 'payé' : 'en_cours');
+            return {
               id: c.id,
               sale_id: c.sale_id || '',
-              patron_id: c.patron_id || patron.id,
-              boutique_id: c.boutique_id || activeBoutiqueId,
+              patron_id: c.patron_id || resolvedMainId,
+              boutique_id: c.boutique_id || currentBtqId,
               client_nom: c.client_nom || '',
-              montant_initial: Number(c.montant_initial) || 0,
-              reste_a_payer: Number(c.reste_a_payer) || 0,
+              montant_initial: totalVal,
+              montant_total: totalVal,
+              montant_paye: payeVal,
+              reste_a_payer: resteVal,
               telephone: c.telephone || '',
               dernier_paiement: c.dernier_paiement || new Date().toISOString(),
+              status: computedStatus,
+              statut: computedStatus,
               synced: true,
-            }))
+            };
+          });
+          const remoteCredIds = new Set(mappedCredits.map((c) => c.id));
+          const localUnsyncedCredits = credits.filter(
+            (c) =>
+              c.synced === false &&
+              !remoteCredIds.has(c.id) &&
+              (c.boutique_id ? c.boutique_id === currentBtqId : c.patron_id === currentBtqId)
           );
+          setRemoteCredits([...localUnsyncedCredits, ...mappedCredits]);
         }
       } catch (cErr) {
         console.warn('[MonArgent] Erreur fetch credits:', cErr);
       }
 
-      // 3. Lire les dépenses depuis Supabase
+      // 3. Lire les dépenses depuis Supabase avec .eq('boutique_id', currentBtqId)
       try {
-        const { data: dData } = await supabase
+        const { data: dData, error: dErr } = await supabase
           .from('depenses')
           .select('*')
-          .or(orClause)
+          .eq('boutique_id', currentBtqId)
           .order('date', { ascending: false });
 
-        if (dData && dData.length > 0) {
-          setRemoteDepenses(
-            dData.map((d) => ({
-              id: d.id,
-              patron_id: d.patron_id || patron.id,
-              boutique_id: d.boutique_id || activeBoutiqueId,
-              type: d.type || 'autre',
-              montant: Number(d.montant) || 0,
-              description: d.description || '',
-              cree_par: d.cree_par || patron.nom,
-              date: d.date || new Date().toISOString(),
-              synced: true,
-            }))
+        if (!dErr && Array.isArray(dData)) {
+          const mappedDepenses: Depense[] = dData.map((d) => ({
+            id: d.id,
+            patron_id: d.patron_id || resolvedMainId,
+            boutique_id: d.boutique_id || currentBtqId,
+            type: d.type || 'autre',
+            montant: Number(d.montant) || 0,
+            description: d.description || '',
+            cree_par: d.cree_par || patron.nom,
+            date: d.date || new Date().toISOString(),
+            synced: true,
+          }));
+          const remoteDepIds = new Set(mappedDepenses.map((d) => d.id));
+          const localUnsyncedDep = depenses.filter(
+            (d) =>
+              d.synced === false &&
+              !remoteDepIds.has(d.id) &&
+              (d.boutique_id ? d.boutique_id === currentBtqId : d.patron_id === currentBtqId)
           );
+          setRemoteDepenses([...localUnsyncedDep, ...mappedDepenses]);
         }
       } catch (dErr) {
         console.warn('[MonArgent] Erreur fetch depenses:', dErr);
@@ -292,6 +331,9 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
   };
 
   useEffect(() => {
+    setRemoteVentes(null);
+    setRemoteCredits(null);
+    setRemoteDepenses(null);
     loadLogs();
     fetchRemoteSolde();
     fetchRemoteData();
@@ -299,7 +341,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
     // Abonnement Supabase Realtime pour synchronisation multi-appareils
     const channel = supabase
-      .channel(`mon_argent_realtime_${patron.id}`)
+      .channel(`mon_argent_realtime_${activeBoutiqueId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ventes' }, () => {
         fetchRemoteSolde();
         fetchRemoteData();
@@ -328,7 +370,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [patron.id]);
+  }, [patron.id, activeBoutiqueId]);
 
   useEffect(() => {
     if (typeof patron.solde === 'number') {
@@ -415,38 +457,41 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
     // RÈGLE : ID unique neuf avec crypto.randomUUID()
     const depenseId = generatePrefixedId('dep');
-    const activeBoutiqueId = getActiveBoutiqueId(patron);
+    const currentBtqId = getActiveBoutiqueId(patron);
+    const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
+    const nowIso = new Date().toISOString();
+    const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
+
     const newDepense: Depense = {
       id: depenseId,
-      patron_id: patron.id,
-      boutique_id: activeBoutiqueId,
+      patron_id: resolvedMainId,
+      boutique_id: currentBtqId,
       type: typeDepense.trim(),
       montant,
       description: descriptionDepense.trim() || undefined,
       cree_par: currentUser.nom,
-      date: new Date().toISOString(),
-      synced: true,
+      date: nowIso,
+      synced: isOnline,
     };
 
     try {
-      // Enregistrement DIRECT dans Supabase (table depenses, expenses et transactions)
-      const depRecord = {
+      // RÈGLE 5 : depenses = montant, date (PAS created_at)
+      const depRecord = buildDepenseSupabasePayload({
         id: depenseId,
-        patron_id: patron.id,
-        boutique_id: activeBoutiqueId,
+        patron_id: resolvedMainId,
+        boutique_id: currentBtqId,
         type: newDepense.type,
         montant: newDepense.montant,
         description: newDepense.description || '',
         cree_par: newDepense.cree_par,
-        date: newDepense.date,
-        synced: true,
-      };
+        date: nowIso,
+      });
 
       const txDepense = {
         id: generatePrefixedId('tx'),
         ticket_id: depenseId,
-        patron_id: patron.id,
-        boutique_id: activeBoutiqueId,
+        patron_id: resolvedMainId,
+        boutique_id: currentBtqId,
         produit_id: 'depense',
         produit_nom: `Dépense: ${newDepense.type}`,
         qte: 1,
@@ -457,48 +502,60 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         status: 'active',
         is_deleted: false,
         vendu_par_nom: currentUser.nom,
-        date: newDepense.date,
+        date: nowIso,
       };
 
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      let depOnlineSaved = false;
+      let txOnlineSaved = false;
+
+      if (isOnline) {
         try {
+          // RÈGLE 2 : Vérifier / upsert patron principal dans `patrons` avant insertion
+          await ensurePatronExistsInSupabase(resolvedMainId, patron);
+
           // UPSERT table transactions (onConflict: 'id')
           const resTx: any = await supabase.from('transactions').upsert(txDepense, { onConflict: 'id' });
-          if (resTx?.status === 409 || resTx?.error?.code === '23505') {
-            console.log('[Sync 409 Déjà présent]', 'transactions', txDepense.id);
+          if (!resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505') {
+            txOnlineSaved = true;
+            if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'transactions', txDepense.id);
+            }
           }
 
-          // Synchronisation miroir depenses
-          try {
-            const resDep: any = await supabase.from('depenses').upsert(depRecord, { onConflict: 'id' });
+          // UPSERT table depenses (onConflict: 'id')
+          const resDep: any = await supabase.from('depenses').upsert(depRecord, { onConflict: 'id' });
+          if (!resDep?.error || resDep?.status === 409 || resDep?.error?.code === '23505') {
+            depOnlineSaved = true;
             if (resDep?.status === 409 || resDep?.error?.code === '23505') {
               console.log('[Sync 409 Déjà présent]', 'depenses', depenseId);
             }
-          } catch {}
+          } else {
+            console.warn('[MonArgent] Erreur upsert depenses:', resDep?.error);
+          }
 
           // Déduire automatiquement le montant de la dépense du Solde en Supabase
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
-            .eq('id', activeBoutiqueId)
+            .eq('id', currentBtqId)
             .maybeSingle();
           let currentSolde = Number(btqData?.solde);
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
-              .eq('id', activeBoutiqueId)
+              .eq('id', currentBtqId)
               .maybeSingle();
             currentSolde = Number(pData?.solde) || 0;
           }
           const updatedSolde = Math.max(0, currentSolde - montant);
-          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
-          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
-          if (patron.id && patron.id !== activeBoutiqueId) {
+          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', currentBtqId);
+          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', currentBtqId);
+          if (resolvedMainId && resolvedMainId !== currentBtqId) {
             try {
-              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', resolvedMainId).maybeSingle();
               const mainSolde = Math.max(0, (Number(mainBtq?.solde) || 0) - montant);
-              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
+              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', resolvedMainId);
             } catch {}
           }
           setRemoteSolde(updatedSolde);
@@ -509,9 +566,15 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         } catch (e) {
           console.error('[MonArgent] Erreur Supabase depenses:', e);
         }
-      } else {
+      }
+
+      if (!depOnlineSaved) {
         newDepense.synced = false;
         await queueSyncItem('depenses', 'insert', depenseId, depRecord);
+      } else {
+        newDepense.synced = true;
+      }
+      if (!txOnlineSaved) {
         await queueSyncItem('transactions', 'insert', txDepense.id, txDepense);
       }
 
@@ -519,9 +582,9 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
       // Log historique action dépense
       await logAction({
-        patron_id: patron.id,
+        patron_id: resolvedMainId,
         user_id: currentUser.id,
-        boutique_id: activeBoutiqueId,
+        boutique_id: currentBtqId,
         qui: currentUser.nom,
         employe_id: currentUser.role !== 'patron' ? currentUser.id : null,
         employe_nom: currentUser.nom,
@@ -536,6 +599,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       setTypeDepense('');
       setMontantDepense('');
       setDescriptionDepense('');
+      await fetchRemoteData();
       onDataRefresh();
     } catch (err) {
       console.error('Erreur dépense:', err);
@@ -551,26 +615,53 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     const montantPaye = parseInt(remboursementMontant, 10);
     if (isNaN(montantPaye) || montantPaye <= 0) return;
 
+    const currentBtqId = getActiveBoutiqueId(patron);
+    const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
+
+    const existingTotal = Number(
+      selectedCredit.montant_total ?? selectedCredit.montant_initial ?? selectedCredit.reste_a_payer
+    ) || 0;
+    const prevPaye = Number(
+      selectedCredit.montant_paye ?? Math.max(0, existingTotal - selectedCredit.reste_a_payer)
+    ) || 0;
     const nouveauReste = Math.max(0, selectedCredit.reste_a_payer - montantPaye);
+    const nouveauPaye = Math.min(existingTotal, prevPaye + montantPaye);
     const isPaid = nouveauReste === 0;
     const nowIso = new Date().toISOString();
+    const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
+
+    const supabaseCreditPayload = buildCreditSupabasePayload({
+      id: selectedCredit.id,
+      patron_id: resolvedMainId,
+      boutique_id: currentBtqId,
+      client_nom: selectedCredit.client_nom,
+      montant_total: existingTotal,
+      montant_paye: nouveauPaye,
+      reste_a_payer: nouveauReste,
+      dernier_paiement: nowIso,
+    });
+
     const updatedCredit: Credit = {
       ...selectedCredit,
+      patron_id: resolvedMainId,
+      boutique_id: currentBtqId,
+      montant_initial: existingTotal,
+      montant_total: existingTotal,
+      montant_paye: nouveauPaye,
       reste_a_payer: nouveauReste,
       status: isPaid ? 'payé' : 'en_cours',
       statut: isPaid ? 'payé' : 'en_cours',
       dernier_paiement: nowIso,
-      synced: typeof navigator !== 'undefined' && navigator.onLine,
+      synced: isOnline,
     };
 
-    const activeBoutiqueId = getActiveBoutiqueId(patron);
     // RÈGLE : ID unique neuf avec crypto.randomUUID()
     const txRembId = generatePrefixedId('remb');
     const rowTxRemb = {
       id: txRembId,
       ticket_id: selectedCredit.sale_id || ('credit-' + selectedCredit.id),
-      patron_id: patron.id,
-      boutique_id: activeBoutiqueId,
+      patron_id: resolvedMainId,
+      boutique_id: currentBtqId,
       produit_id: 'remboursement_credit',
       produit_nom: `Remboursement crédit (${selectedCredit.client_nom})`,
       qte: 1,
@@ -587,21 +678,35 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     };
 
     try {
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      let creditOnlineSaved = false;
+      let txOnlineSaved = false;
+
+      if (isOnline) {
         try {
-          // UPDATE permanent dans Supabase (ne jamais supprimer, marquer 'payé' si reste 0)
-          await supabase.from('credits').update({
-            reste_a_payer: nouveauReste,
-            status: isPaid ? 'payé' : 'en_cours',
-            statut: isPaid ? 'payé' : 'en_cours',
-            dernier_paiement: nowIso,
-          }).eq('id', selectedCredit.id);
+          // RÈGLE 2 : Vérifier / upsert patron principal dans `patrons`
+          await ensurePatronExistsInSupabase(resolvedMainId, patron);
+
+          // RÈGLE 4 & 5 : .upsert() sur credits avec colonnes exactes (montant_total, montant_paye, reste_a_payer, dernier_paiement)
+          const resCred: any = await supabase
+            .from('credits')
+            .upsert(supabaseCreditPayload, { onConflict: 'id' });
+          if (!resCred?.error || resCred?.status === 409 || resCred?.error?.code === '23505') {
+            creditOnlineSaved = true;
+            if (resCred?.status === 409 || resCred?.error?.code === '23505') {
+              console.log('[Sync 409 Déjà présent]', 'credits', selectedCredit.id);
+            }
+          } else {
+            console.warn('[MonArgent] Erreur upsert remboursement credits:', resCred?.error);
+          }
 
           // UPSERT direct dans table transactions (onConflict: 'id')
           try {
             const resTx: any = await supabase.from('transactions').upsert(rowTxRemb, { onConflict: 'id' });
-            if (resTx?.status === 409 || resTx?.error?.code === '23505') {
-              console.log('[Sync 409 Déjà présent]', 'transactions', txRembId);
+            if (!resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505') {
+              txOnlineSaved = true;
+              if (resTx?.status === 409 || resTx?.error?.code === '23505') {
+                console.log('[Sync 409 Déjà présent]', 'transactions', txRembId);
+              }
             }
           } catch {}
 
@@ -609,25 +714,25 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
-            .eq('id', activeBoutiqueId)
+            .eq('id', currentBtqId)
             .maybeSingle();
           let currentSolde = Number(btqData?.solde);
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
-              .eq('id', activeBoutiqueId)
+              .eq('id', currentBtqId)
               .maybeSingle();
             currentSolde = Number(pData?.solde) || 0;
           }
           const updatedSolde = currentSolde + montantPaye;
-          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
-          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', activeBoutiqueId);
-          if (patron.id && patron.id !== activeBoutiqueId) {
+          await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', currentBtqId);
+          await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', currentBtqId);
+          if (resolvedMainId && resolvedMainId !== currentBtqId) {
             try {
-              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', patron.id).maybeSingle();
+              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', resolvedMainId).maybeSingle();
               const mainSolde = (Number(mainBtq?.solde) || 0) + montantPaye;
-              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', patron.id);
+              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', resolvedMainId);
             } catch {}
           }
           setRemoteSolde(updatedSolde);
@@ -638,13 +743,15 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         } catch (cErr) {
           console.error('[MonArgent] Erreur remboursement credit Supabase:', cErr);
         }
+      }
+
+      if (!creditOnlineSaved) {
+        updatedCredit.synced = false;
+        await queueSyncItem('credits', 'update', selectedCredit.id, supabaseCreditPayload);
       } else {
-        await queueSyncItem('credits', 'update', selectedCredit.id, {
-          reste_a_payer: nouveauReste,
-          status: isPaid ? 'payé' : 'en_cours',
-          statut: isPaid ? 'payé' : 'en_cours',
-          dernier_paiement: nowIso,
-        });
+        updatedCredit.synced = true;
+      }
+      if (!txOnlineSaved) {
         await queueSyncItem('transactions', 'insert', txRembId, rowTxRemb);
       }
 
@@ -652,9 +759,9 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
       // Log historique action remboursement dette
       await logAction({
-        patron_id: patron.id,
+        patron_id: resolvedMainId,
         user_id: currentUser.id,
-        boutique_id: activeBoutiqueId,
+        boutique_id: currentBtqId,
         qui: currentUser.nom,
         employe_id: currentUser.role !== 'patron' ? currentUser.id : null,
         employe_nom: currentUser.nom,
@@ -668,6 +775,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       );
       setSelectedCredit(null);
       setRemboursementMontant('');
+      await fetchRemoteData();
       onDataRefresh();
     } catch (err) {
       console.error('Erreur remboursement:', err);
@@ -740,18 +848,24 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         await db.ventes.delete(vente.id);
       }
 
-      // 4. Si crédit associé, le supprimer ou déduire dans Supabase & local
+      // 4. Si crédit associé, le supprimer ou déduire dans Supabase & local (isolé par boutique_id)
+      const currentBtqId = getActiveBoutiqueId(patron);
+      const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
+
       if (vente.est_credit && (vente.ticket_id || vente.id || vente.client_nom)) {
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase
               .from('credits')
               .delete()
-              .or(`sale_id.eq.${vente.ticket_id || vente.id},and(client_nom.eq.${vente.client_nom},patron_id.eq.${patron.id})`);
+              .eq('boutique_id', currentBtqId)
+              .eq('client_nom', vente.client_nom || 'Sans nom');
           } catch {}
         }
         const clientCredits = credits.filter(
-          (c) => (c.sale_id && (c.sale_id === vente.ticket_id || c.sale_id === vente.id)) || c.client_nom === vente.client_nom
+          (c) =>
+            (c.boutique_id ? c.boutique_id === currentBtqId : c.patron_id === currentBtqId) &&
+            ((c.sale_id && (c.sale_id === vente.ticket_id || c.sale_id === vente.id)) || c.client_nom === vente.client_nom)
         );
         for (const c of clientCredits) {
           await db.credits.delete(c.id);
@@ -770,20 +884,20 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
             const { data: btqData } = await supabase
               .from('boutiques')
               .select('solde')
-              .eq('id', patron.id)
+              .eq('id', currentBtqId)
               .maybeSingle();
             let currentRemoteSolde = Number(btqData?.solde);
             if (isNaN(currentRemoteSolde)) {
               const { data: pData } = await supabase
                 .from('patrons')
                 .select('solde')
-                .eq('id', patron.id)
+                .eq('id', currentBtqId)
                 .maybeSingle();
               currentRemoteSolde = Number(pData?.solde) || 0;
             }
             newCalculatedSolde = Math.max(0, currentRemoteSolde - montantRembourse);
-            await supabase.from('boutiques').update({ solde: newCalculatedSolde }).eq('id', patron.id);
-            await supabase.from('patrons').update({ solde: newCalculatedSolde }).eq('id', patron.id);
+            await supabase.from('boutiques').update({ solde: newCalculatedSolde }).eq('id', currentBtqId);
+            await supabase.from('patrons').update({ solde: newCalculatedSolde }).eq('id', currentBtqId);
           } catch (sErr) {
             console.warn('[MonArgent] Note mise à jour solde caisse Supabase:', sErr);
           }
@@ -795,10 +909,10 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         } catch {}
       }
 
-      // 6. Logger dans logsSuppression et activity_logs / historique_actions
+      // 6. Logger dans logsSuppression et historique_actions
       const logEntry: LogSuppression = {
         id: generatePrefixedId('log'),
-        patron_id: patron.id,
+        patron_id: resolvedMainId,
         vente_id: vente.id,
         ticket_id: vente.ticket_id,
         produit_nom: vente.produit_nom,
@@ -813,11 +927,10 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       await db.logsSuppression.put(logEntry);
       await queueSyncItem('logs_suppression', 'insert', logEntry.id, logEntry);
 
-      const activeBoutiqueId = getActiveBoutiqueId(patron);
       await logAction({
-        patron_id: patron.id,
+        patron_id: resolvedMainId,
         user_id: currentUser.id,
-        boutique_id: activeBoutiqueId,
+        boutique_id: currentBtqId,
         qui: currentUser.nom,
         action_type: 'suppression',
         description: `Annulation vente ${vente.qte}x ${vente.produit_nom} (${vente.montant_total}F). Motif: Annulation erreur de saisie`,

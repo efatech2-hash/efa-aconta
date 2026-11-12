@@ -1,8 +1,9 @@
 import { db } from './db';
 import { supabase } from './supabase';
 import { queueSyncItem } from './sync';
-import type { ActionType, HistoriqueAction, CurrentUser, Patron } from './types';
+import type { ActionType, HistoriqueAction } from './types';
 import { getActiveBoutiqueId } from './deviceAuth';
+import { ensurePatronExistsInSupabase, resolveMainPatronId } from './supabaseHelper';
 
 import { generatePrefixedId } from './uuid';
 
@@ -28,11 +29,13 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
   const id = generatePrefixedId('act');
   const qui = params.qui || (params.employe_nom ? `Vendeur/se ${params.employe_nom}` : 'Patron');
   const activeBoutiqueId = params.boutique_id || getActiveBoutiqueId({ id: params.patron_id }) || params.patron_id;
+  // RÈGLE 1 : patron_id est toujours le patron principal (Boutique 1)
+  const mainPatronId = (await resolveMainPatronId(params.patron_id)) || params.patron_id;
 
   const actionRecord: HistoriqueAction = {
     id,
-    user_id: params.user_id || params.patron_id,
-    patron_id: params.patron_id,
+    user_id: params.user_id || mainPatronId,
+    patron_id: mainPatronId,
     boutique_id: activeBoutiqueId,
     employe_id: params.employe_id || null,
     employe_nom: params.employe_nom || undefined,
@@ -45,16 +48,17 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
     created_at: nowIso,
   };
 
+  // RÈGLE 5 : historique_actions = montant, created_at
   const syncPayload = {
     id,
     user_id: actionRecord.user_id,
-    patron_id: actionRecord.patron_id,
-    boutique_id: actionRecord.boutique_id,
-    employe_id: actionRecord.employe_id,
-    employe_nom: actionRecord.employe_nom,
+    patron_id: mainPatronId,
+    boutique_id: activeBoutiqueId,
+    employe_id: actionRecord.employe_id ?? null,
+    employe_nom: actionRecord.employe_nom ?? null,
     action_type: actionRecord.action_type,
     description: actionRecord.description,
-    montant: actionRecord.montant,
+    montant: actionRecord.montant ?? null,
     created_at: nowIso,
   };
 
@@ -67,6 +71,9 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
     // 2. Envoi direct Supabase table historique_actions (upsert anti-conflit)
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
+        // RÈGLE 2 : Vérifier que le patron_id existe dans `patrons` (upsert sinon)
+        await ensurePatronExistsInSupabase(mainPatronId);
+
         const res = await supabase
           .from('historique_actions')
           .upsert([syncPayload], { onConflict: 'id' });
@@ -77,6 +84,8 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
           if (res?.status === 409 || res?.error?.code === '23505') {
             console.log('[Sync 409 Déjà présent]', 'historique_actions', id);
           }
+        } else {
+          console.warn('[Historique] Erreur upsert historique_actions:', res?.error);
         }
       } catch (hErr) {
         console.warn('[Historique] Note upsert historique_actions:', hErr);
@@ -117,27 +126,24 @@ export async function purgeOldHistoriqueActions(): Promise<void> {
 }
 
 /**
- * Récupère l'historique trié par date décroissante pour un patron (100% Supabase table historique_actions + cache Dexie)
+ * Récupère l'historique trié par date décroissante pour la boutique active (100% isolé par boutique_id)
  */
 export async function getHistoriqueActions(patronId: string, boutiqueId?: string): Promise<HistoriqueAction[]> {
   // Purge préventive des actions de plus de 24h
   purgeOldHistoriqueActions().catch(() => {});
   const activeBoutiqueId = boutiqueId || getActiveBoutiqueId({ id: patronId }) || patronId;
-  const isSub = Boolean(activeBoutiqueId && activeBoutiqueId !== patronId);
-  const filterClause = isSub
-    ? `boutique_id.eq.${activeBoutiqueId}`
-    : `boutique_id.eq.${patronId},patron_id.eq.${patronId}`;
 
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
+      // RÈGLE 3 : Toujours filtrer avec .eq('boutique_id', boutique_active)
       const { data: histLogs, error: histErr } = await supabase
         .from('historique_actions')
         .select('*')
-        .or(filterClause)
+        .eq('boutique_id', activeBoutiqueId)
         .order('created_at', { ascending: false });
 
-      if (!histErr && histLogs && histLogs.length > 0) {
-        return histLogs.map((h) => ({
+      if (!histErr && Array.isArray(histLogs)) {
+        const mapped = histLogs.map((h) => ({
           id: h.id,
           patron_id: h.patron_id || patronId,
           boutique_id: h.boutique_id || activeBoutiqueId,
@@ -149,6 +155,26 @@ export async function getHistoriqueActions(patronId: string, boutiqueId?: string
           montant: h.montant,
           created_at: h.created_at || new Date().toISOString(),
         }));
+
+        if (mapped.length > 0) {
+          try {
+            await db.historiqueActions.bulkPut(mapped);
+          } catch {}
+        }
+
+        // Fusionner d'éventuelles actions locales créées hors-ligne pour cette boutique
+        try {
+          const localForBtq = await db.historiqueActions
+            .filter((a) => (a.boutique_id ? a.boutique_id === activeBoutiqueId : a.patron_id === activeBoutiqueId))
+            .toArray();
+          const remoteIds = new Set(mapped.map((m) => m.id));
+          const extraLocal = localForBtq.filter((l) => !remoteIds.has(l.id) && (l as any).synced === false);
+          return [...extraLocal, ...mapped].sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          );
+        } catch {
+          return mapped;
+        }
       }
     }
   } catch (err) {
@@ -157,7 +183,7 @@ export async function getHistoriqueActions(patronId: string, boutiqueId?: string
 
   try {
     const list = await db.historiqueActions
-      .filter((a) => isSub ? a.boutique_id === activeBoutiqueId : (a.boutique_id === patronId || a.patron_id === patronId))
+      .filter((a) => (a.boutique_id ? a.boutique_id === activeBoutiqueId : a.patron_id === activeBoutiqueId))
       .reverse()
       .sortBy('created_at');
     return list;
