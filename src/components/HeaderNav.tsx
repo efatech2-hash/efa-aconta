@@ -52,6 +52,7 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   const [isInstallable, setIsInstallable] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isPhotoViewerOpen, setIsPhotoViewerOpen] = useState(false);
   const { isVoiceOn, toggleVoice, speak } = useVoice();
 
   useEffect(() => {
@@ -138,10 +139,10 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
             <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 overflow-hidden">
               <button
                 type="button"
-                onClick={onOpenLockScreen}
-                className="relative focus:outline-none group shrink-0"
-                title="Changer d'utilisateur (QUI VEND ?)"
-                aria-label="Changer d'utilisateur"
+                onClick={() => setIsPhotoViewerOpen(true)}
+                className="relative focus:outline-none group shrink-0 cursor-pointer"
+                title="Voir la photo de profil (grand format)"
+                aria-label="Voir la photo de profil"
               >
                 {currentUser.photo_url ? (
                   <img
@@ -154,9 +155,6 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                     {currentUser.nom.charAt(0).toUpperCase()}
                   </div>
                 )}
-                <div className="absolute -bottom-1 -right-1 bg-gray-900 text-white p-0.5 sm:p-1 rounded-full text-[9px]">
-                  <Lock className="w-2.5 h-2.5" />
-                </div>
               </button>
 
               <div
@@ -693,6 +691,77 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
             </button>
           </div>
         </>
+      )}
+
+      {/* MODAL PHOTO DE PROFIL EN GRAND (Style WhatsApp, plein écran, sans choix vendeur) */}
+      {isPhotoViewerOpen && (
+        <div
+          className="fixed inset-0 z-[999999] bg-black/92 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 select-none animate-in fade-in duration-200"
+          onClick={() => setIsPhotoViewerOpen(false)}
+          role="dialog"
+          aria-label="Photo de profil en grand format"
+        >
+          {/* Header style WhatsApp */}
+          <div
+            className="w-full max-w-xl mx-auto flex items-center justify-between pt-2 pb-4 text-white"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => setIsPhotoViewerOpen(false)}
+                className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 transition flex items-center justify-center text-white cursor-pointer shrink-0"
+                title="Fermer"
+                aria-label="Fermer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <div className="min-w-0 truncate">
+                <h3 className="font-black text-base sm:text-lg leading-tight truncate">
+                  {currentUser.prenom || currentUser.nom}
+                </h3>
+                <p className="text-xs text-gray-300 font-semibold truncate">
+                  {currentUser.role === 'patron' ? 'Patron' : 'Vendeur/se'} • {patron.nom_boutique || 'Ma Boutique'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsPhotoViewerOpen(false)}
+              className="text-xs font-bold text-gray-400 hover:text-white px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 cursor-pointer"
+            >
+              Fermer
+            </button>
+          </div>
+
+          {/* Image centrale haute résolution */}
+          <div
+            className="flex-1 flex items-center justify-center p-2"
+            onClick={() => setIsPhotoViewerOpen(false)}
+          >
+            {currentUser.photo_url ? (
+              <img
+                src={currentUser.photo_url}
+                alt={currentUser.nom}
+                className="max-w-full max-h-[75vh] w-auto h-auto rounded-3xl object-contain shadow-2xl border border-white/20 animate-in zoom-in-95 duration-200"
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <div
+                className="w-52 h-52 sm:w-64 sm:h-64 rounded-full bg-[#6C5CE7] text-white flex items-center justify-center font-black text-6xl sm:text-7xl shadow-2xl border-4 border-white/20 animate-in zoom-in-95 duration-200"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {currentUser.nom.charAt(0).toUpperCase()}
+              </div>
+            )}
+          </div>
+
+          {/* Footer discret */}
+          <div className="w-full text-center pb-3 text-xs font-semibold text-gray-400">
+            Toucher l'écran ou la croix pour fermer
+          </div>
+        </div>
       )}
     </>
   );

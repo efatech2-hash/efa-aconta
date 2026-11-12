@@ -447,8 +447,18 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
     const newNom = editEmpNom.trim();
     const oldNom = editingEmp.nom;
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+          await supabase.from('employes').update({
+            nom: newNom,
+            boutique_id: mainStoreId || patron.id,
+          }).eq('id', editingEmp.id);
+        } catch (sErr) {
+          console.warn('[EmployesScreen] Note update nom Supabase:', sErr);
+        }
+      }
       await db.employes.update(editingEmp.id, { nom: newNom });
-      await queueSyncItem('employes', 'update', editingEmp.id, { nom: newNom });
+      await queueSyncItem('employes', 'update', editingEmp.id, { nom: newNom, boutique_id: mainStoreId || patron.id });
 
       logAction({
         patron_id: patron.id,

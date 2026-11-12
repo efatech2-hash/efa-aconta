@@ -2,6 +2,7 @@ import { db } from './db';
 import { supabase } from './supabase';
 import { queueSyncItem } from './sync';
 import type { ActionType, HistoriqueAction, CurrentUser, Patron } from './types';
+import { getActiveBoutiqueId } from './deviceAuth';
 
 export interface LogActionParams {
   patron_id: string;
@@ -23,12 +24,13 @@ export async function logAction(params: LogActionParams): Promise<HistoriqueActi
   const nowIso = new Date().toISOString();
   const id = 'act-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
   const qui = params.qui || (params.employe_nom ? `Vendeur/se ${params.employe_nom}` : 'Patron');
+  const activeBoutiqueId = params.boutique_id || getActiveBoutiqueId({ id: params.patron_id }) || params.patron_id;
 
   const actionRecord: HistoriqueAction = {
     id,
     user_id: params.user_id || params.patron_id,
     patron_id: params.patron_id,
-    boutique_id: params.boutique_id || params.patron_id,
+    boutique_id: activeBoutiqueId,
     employe_id: params.employe_id || null,
     employe_nom: params.employe_nom || undefined,
     qui,
@@ -110,22 +112,28 @@ export async function purgeOldHistoriqueActions(): Promise<void> {
 /**
  * Récupère l'historique trié par date décroissante pour un patron (100% Supabase table historique_actions + cache Dexie)
  */
-export async function getHistoriqueActions(patronId: string): Promise<HistoriqueAction[]> {
+export async function getHistoriqueActions(patronId: string, boutiqueId?: string): Promise<HistoriqueAction[]> {
   // Purge préventive des actions de plus de 24h
   purgeOldHistoriqueActions().catch(() => {});
+  const activeBoutiqueId = boutiqueId || getActiveBoutiqueId({ id: patronId }) || patronId;
+  const isSub = Boolean(activeBoutiqueId && activeBoutiqueId !== patronId);
+  const filterClause = isSub
+    ? `boutique_id.eq.${activeBoutiqueId}`
+    : `boutique_id.eq.${patronId},patron_id.eq.${patronId}`;
+
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       const { data: histLogs, error: histErr } = await supabase
         .from('historique_actions')
         .select('*')
-        .or(`patron_id.eq.${patronId},boutique_id.eq.${patronId}`)
+        .or(filterClause)
         .order('created_at', { ascending: false });
 
       if (!histErr && histLogs && histLogs.length > 0) {
         return histLogs.map((h) => ({
           id: h.id,
           patron_id: h.patron_id || patronId,
-          boutique_id: h.boutique_id,
+          boutique_id: h.boutique_id || activeBoutiqueId,
           user_id: h.user_id,
           employe_id: h.employe_id,
           employe_nom: h.employe_nom,
@@ -142,8 +150,7 @@ export async function getHistoriqueActions(patronId: string): Promise<Historique
 
   try {
     const list = await db.historiqueActions
-      .where('patron_id')
-      .equals(patronId)
+      .filter((a) => isSub ? a.boutique_id === activeBoutiqueId : (a.boutique_id === patronId || a.patron_id === patronId))
       .reverse()
       .sortBy('created_at');
     return list;

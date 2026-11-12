@@ -24,6 +24,8 @@ export interface Patron {
   code_pin?: string; // code PIN / mot de passe colonne Supabase
   mot_de_passe?: string; // mot de passe synchro
   photo_url?: string;
+  photo_devanture?: string;
+  adresse?: string;
   genre: Genre;
   role: 'patron';
   abonnement_expire: string; // ISO date string

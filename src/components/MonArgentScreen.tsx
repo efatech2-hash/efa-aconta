@@ -413,9 +413,11 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
     setFeedback(null);
 
     const depenseId = 'dep-' + Date.now();
+    const activeBoutiqueId = getActiveBoutiqueId(patron);
     const newDepense: Depense = {
       id: depenseId,
       patron_id: patron.id,
+      boutique_id: activeBoutiqueId,
       type: typeDepense.trim(),
       montant,
       description: descriptionDepense.trim() || undefined,
@@ -423,8 +425,6 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       date: new Date().toISOString(),
       synced: true,
     };
-
-    const activeBoutiqueId = getActiveBoutiqueId(patron);
 
     try {
       // Enregistrement DIRECT dans Supabase (table depenses, expenses et transactions)

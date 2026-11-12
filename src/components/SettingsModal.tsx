@@ -30,6 +30,7 @@ import {
   Trash2,
   Laptop,
   Bell,
+  MapPin,
 } from 'lucide-react';
 import type { Patron, CurrentUser, Employe } from '../lib/types';
 import { verifyPin, hashPin } from '../lib/security';
@@ -81,6 +82,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onNavigate,
   onOpenMonAbonnementModal,
 }) => {
+  // Paramètres réservés exclusivement à la boutique principale (aucun paramètre pour btq 2/3)
+  const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
+  if (!isOpen || isSubStore) return null;
+
   // Changement de PIN
   const [isChangingPin, setIsChangingPin] = useState(false);
   const [oldPin, setOldPin] = useState('');
@@ -127,6 +132,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Photo profil patron
   const [patronPhotoUrl, setPatronPhotoUrl] = useState<string>(patron.photo_url || '');
+
+  // Photo devanture boutique
+  const [boutiqueDevantureUrl, setBoutiqueDevantureUrl] = useState<string>(patron.photo_devanture || (patron as any).devanture_url || '');
+
+  // Adresse boutique
+  const [boutiqueAdresse, setBoutiqueAdresse] = useState(patron.adresse || (patron as any).adresse_boutique || '');
+  const [isSavingBoutiqueAdresse, setIsSavingBoutiqueAdresse] = useState(false);
+  const [boutiqueAdresseFeedback, setBoutiqueAdresseFeedback] = useState<string | null>(null);
 
   // MODIF 6: Modifier Nom employé
   const [editingEmp, setEditingEmp] = useState<Employe | null>(null);
@@ -338,10 +351,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await db.patrons.update(patron.id, { nom: newNom });
       await queueSyncItem('patrons', 'update', patron.id, { nom: newNom });
       try {
+        await supabase.from('boutiques').update({ proprietaire: newNom, updated_at: new Date().toISOString() }).eq('id', patron.id);
         await supabase.from('patrons').update({ nom: newNom }).eq('id', patron.id);
       } catch {}
       logAction({
         patron_id: patron.id,
+        boutique_id: patron.id,
         action_type: 'modif_stock',
         description: `Modification profil patron : nom changé de "${oldNom}" en "${newNom}"`,
       }).catch(console.error);
@@ -367,6 +382,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await db.patrons.update(patron.id, { photo_url: photo });
       await queueSyncItem('patrons', 'update', patron.id, { photo_url: photo });
       try {
+        await supabase.from('boutiques').update({ photo_url: photo, photo_profil: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
         await supabase.from('patrons').update({ photo_url: photo }).eq('id', patron.id);
       } catch {}
       onPatronUpdated(updated);
@@ -385,6 +401,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await db.patrons.update(patron.id, { photo_url: photo });
       await queueSyncItem('patrons', 'update', patron.id, { photo_url: photo });
       try {
+        await supabase.from('boutiques').update({ photo_url: photo, photo_profil: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
         await supabase.from('patrons').update({ photo_url: photo }).eq('id', patron.id);
       } catch {}
       onPatronUpdated(updated);
@@ -398,7 +415,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     await db.patrons.update(patron.id, { photo_url: undefined });
     await queueSyncItem('patrons', 'update', patron.id, { photo_url: null });
     try {
+      await supabase.from('boutiques').update({ photo_url: null, photo_profil: null, updated_at: new Date().toISOString() }).eq('id', patron.id);
       await supabase.from('patrons').update({ photo_url: null }).eq('id', patron.id);
+    } catch {}
+    onPatronUpdated(updated);
+  };
+
+  const handleCameraDevanturePhoto = async () => {
+    const photo = await takePhotoFromCamera({
+      formKey: 'boutique_devanture',
+      formData: { id: patron.id, nom: boutiqueNom },
+    });
+    if (photo) {
+      setBoutiqueDevantureUrl(photo);
+      const updated: Patron = { ...patron, photo_devanture: photo };
+      await db.patrons.update(patron.id, { photo_devanture: photo } as any);
+      await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: photo });
+      try {
+        await supabase.from('boutiques').update({ photo_devanture: photo, devanture_url: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
+        await supabase.from('patrons').update({ photo_devanture: photo } as any).eq('id', patron.id);
+      } catch {}
+      onPatronUpdated(updated);
+      speakFrench('Photo de la devanture mise à jour');
+    }
+  };
+
+  const handleGalleryDevanturePhoto = async () => {
+    const photo = await pickPhotoFromGallery({
+      formKey: 'boutique_devanture',
+      formData: { id: patron.id, nom: boutiqueNom },
+    });
+    if (photo) {
+      setBoutiqueDevantureUrl(photo);
+      const updated: Patron = { ...patron, photo_devanture: photo };
+      await db.patrons.update(patron.id, { photo_devanture: photo } as any);
+      await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: photo });
+      try {
+        await supabase.from('boutiques').update({ photo_devanture: photo, devanture_url: photo, updated_at: new Date().toISOString() }).eq('id', patron.id);
+        await supabase.from('patrons').update({ photo_devanture: photo } as any).eq('id', patron.id);
+      } catch {}
+      onPatronUpdated(updated);
+      speakFrench('Photo de la devanture mise à jour');
+    }
+  };
+
+  const handleRemoveDevanturePhoto = async () => {
+    setBoutiqueDevantureUrl('');
+    const updated: Patron = { ...patron, photo_devanture: undefined };
+    await db.patrons.update(patron.id, { photo_devanture: undefined } as any);
+    await queueSyncItem('patrons', 'update', patron.id, { photo_devanture: null });
+    try {
+      await supabase.from('boutiques').update({ photo_devanture: null, devanture_url: null, updated_at: new Date().toISOString() }).eq('id', patron.id);
+      await supabase.from('patrons').update({ photo_devanture: null } as any).eq('id', patron.id);
     } catch {}
     onPatronUpdated(updated);
   };
@@ -415,10 +483,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await db.patrons.update(patron.id, { nom_boutique: newNom });
       await queueSyncItem('patrons', 'update', patron.id, { nom_boutique: newNom });
       try {
+        await supabase.from('boutiques').update({ nom_boutique: newNom, nom: newNom, updated_at: new Date().toISOString() }).eq('id', patron.id);
         await supabase.from('patrons').update({ nom_boutique: newNom }).eq('id', patron.id);
       } catch {}
       logAction({
         patron_id: patron.id,
+        boutique_id: patron.id,
         action_type: 'modif_stock',
         description: `Modification boutique : nom changé de "${oldNom}" en "${newNom}"`,
       }).catch(console.error);
@@ -433,6 +503,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handleUpdateBoutiqueAdresse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingBoutiqueAdresse(true);
+    setBoutiqueAdresseFeedback(null);
+    const newAdresse = boutiqueAdresse.trim();
+    try {
+      const updated: Patron = { ...patron, adresse: newAdresse };
+      await db.patrons.update(patron.id, { adresse: newAdresse } as any);
+      await queueSyncItem('patrons', 'update', patron.id, { adresse: newAdresse });
+      try {
+        await supabase.from('boutiques').update({ adresse: newAdresse, adresse_boutique: newAdresse, updated_at: new Date().toISOString() }).eq('id', patron.id);
+        await supabase.from('patrons').update({ adresse: newAdresse } as any).eq('id', patron.id);
+      } catch {}
+      logAction({
+        patron_id: patron.id,
+        boutique_id: patron.id,
+        action_type: 'modif_stock',
+        description: `Modification adresse boutique : "${newAdresse}"`,
+      }).catch(console.error);
+      onPatronUpdated(updated);
+      setBoutiqueAdresseFeedback('Adresse modifiée avec succès !');
+      speakFrench('Adresse boutique enregistrée');
+      setTimeout(() => setBoutiqueAdresseFeedback(null), 2500);
+    } catch {
+      setBoutiqueAdresseFeedback('Erreur lors de la modification');
+    } finally {
+      setIsSavingBoutiqueAdresse(false);
+    }
+  };
+
   const handleSaveEditEmpNom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingEmp || !editEmpNom.trim()) return;
@@ -440,18 +540,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const oldNom = editingEmp.nom;
     try {
       await db.employes.update(editingEmp.id, { nom: newNom });
-      await queueSyncItem('employes', 'update', editingEmp.id, { nom: newNom });
+      await queueSyncItem('employes', 'update', editingEmp.id, { nom: newNom, boutique_id: patron.id });
       try {
-        await supabase.from('employes').update({ nom: newNom }).eq('id', editingEmp.id);
+        await supabase.from('employes').update({
+          nom: newNom,
+          boutique_id: patron.id,
+          updated_at: new Date().toISOString(),
+        }).eq('id', editingEmp.id);
       } catch {}
       logAction({
         patron_id: patron.id,
+        boutique_id: patron.id,
         action_type: 'modif_stock',
         description: `Modification employé : "${oldNom}" renommé en "${newNom}"`,
       }).catch(console.error);
       speakFrench(`Employé renommé : ${newNom}`);
       setEditingEmp(null);
       setEditEmpNom('');
+      onDataRefresh?.();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteEmp = async (emp: Employe) => {
+    if (!confirm(`Supprimer définitivement l'employé ${emp.nom} ?`)) return;
+    try {
+      try {
+        await supabase.from('employes').delete().eq('id', emp.id);
+      } catch {}
+      await db.employes.delete(emp.id);
+      await queueSyncItem('employes', 'delete', emp.id, { status: 'deleted' });
+      logAction({
+        patron_id: patron.id,
+        boutique_id: patron.id,
+        action_type: 'suppression',
+        description: `Suppression employé ${emp.nom} depuis Paramètres`,
+      }).catch(console.error);
+      speakFrench(`Employé ${emp.nom} supprimé`);
       onDataRefresh?.();
     } catch (err) {
       console.error(err);
@@ -895,11 +1021,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* MODIF 6: SECTION MA BOUTIQUE */}
-        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-3">
+        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-4">
           <div className="flex items-center gap-2">
             <Store className="w-4 h-4 text-indigo-600" />
-            <h4 className="font-black text-xs sm:text-sm text-gray-900">Ma boutique</h4>
+            <h4 className="font-black text-xs sm:text-sm text-gray-900">Ma boutique (Principale)</h4>
           </div>
+
+          {/* Photo de devanture */}
+          <div className="flex items-center gap-3 py-1">
+            <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-indigo-100 flex items-center justify-center overflow-hidden border-2 border-indigo-300 shrink-0 shadow-xs">
+              {boutiqueDevantureUrl ? (
+                <img src={boutiqueDevantureUrl} alt="Devanture" className="w-full h-full object-cover" />
+              ) : (
+                <Store className="w-7 h-7 text-indigo-400 stroke-[1.8]" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <span className="block text-[11px] font-bold text-gray-600 mb-1">
+                Photo de la devanture :
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={handleCameraDevanturePhoto}
+                  className="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 active:scale-95 text-xs font-black text-white cursor-pointer flex items-center gap-1.5 shadow-xs transition touch-manipulation border border-teal-500/20"
+                >
+                  <Camera className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Caméra</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGalleryDevanturePhoto}
+                  className="px-3 py-1.5 rounded-xl bg-[#6C5CE7] hover:bg-[#5b4bc4] active:scale-95 text-xs font-black text-white cursor-pointer flex items-center gap-1.5 shadow-xs transition touch-manipulation border border-indigo-500/20"
+                >
+                  <ImageIcon className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Galerie</span>
+                </button>
+                {boutiqueDevantureUrl && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveDevanturePhoto}
+                    className="px-2 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold transition active:scale-95 cursor-pointer border border-red-200"
+                  >
+                    Retirer
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Formulaire Nom Boutique */}
           <form onSubmit={handleUpdateBoutiqueNom} className="space-y-1.5">
             <label className="block text-xs font-bold text-gray-600">Nom de la boutique :</label>
             <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
@@ -925,6 +1096,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </p>
             )}
           </form>
+
+          {/* Formulaire Adresse Boutique */}
+          <form onSubmit={handleUpdateBoutiqueAdresse} className="space-y-1.5 pt-1 border-t border-indigo-100">
+            <label className="block text-xs font-bold text-gray-600 flex items-center gap-1">
+              <MapPin className="w-3.5 h-3.5 text-indigo-500" />
+              <span>Adresse / Quartier de la boutique :</span>
+            </label>
+            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+              <input
+                type="text"
+                value={boutiqueAdresse}
+                onChange={(e) => setBoutiqueAdresse(e.target.value)}
+                placeholder="Ex: Marché de Lomé, Assigamé"
+                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
+              />
+              <button
+                type="submit"
+                disabled={isSavingBoutiqueAdresse}
+                className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-xs shadow-xs transition cursor-pointer shrink-0"
+              >
+                {isSavingBoutiqueAdresse ? '...' : 'Enregistrer'}
+              </button>
+            </div>
+            {boutiqueAdresseFeedback && (
+              <p className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                <Check className="w-3.5 h-3.5 stroke-[3]" />
+                <span>{boutiqueAdresseFeedback}</span>
+              </p>
+            )}
+          </form>
         </div>
 
         {/* MODIF 6: SECTION EMPLOYÉS */}
@@ -935,7 +1136,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <Users className="w-5 h-5 text-purple-600" />
                 <h4 className="font-black text-sm text-gray-900">Employés ({employes.length})</h4>
               </div>
-              <span className="text-[11px] font-bold text-purple-700">Clique sur le crayon pour renommer</span>
+              <span className="text-[11px] font-bold text-purple-700">Gérer mes employés</span>
             </div>
             <div className="space-y-2">
               {employes.map((emp) => (
@@ -952,17 +1153,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <p className="text-[10px] font-bold text-gray-400">{emp.phone_full || emp.telephone}</p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingEmp(emp);
-                      setEditEmpNom(emp.nom);
-                    }}
-                    className="p-2 rounded-lg text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition cursor-pointer flex-shrink-0"
-                    title="Modifier le nom de l'employé"
-                  >
-                    <Pencil className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingEmp(emp);
+                        setEditEmpNom(emp.nom);
+                      }}
+                      className="p-2 rounded-lg text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition cursor-pointer"
+                      title="Modifier le nom de l'employé"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteEmp(emp)}
+                      className="p-2 rounded-lg text-red-500 hover:text-red-700 hover:bg-red-50 transition cursor-pointer"
+                      title="Supprimer l'employé"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

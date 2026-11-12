@@ -402,6 +402,9 @@ export default function App() {
               currentPatron = {
                 ...currentPatron,
                 ...converted,
+                photo_url: bDataRecord.photo_url || bDataRecord.photo_profil || currentPatron.photo_url || converted.photo_url,
+                photo_devanture: bDataRecord.photo_devanture || bDataRecord.devanture_url || currentPatron.photo_devanture || converted.photo_devanture,
+                adresse: bDataRecord.adresse || bDataRecord.adresse_boutique || currentPatron.adresse || converted.adresse,
                 subscription_status: isPro ? 'pro' : converted.subscription_status,
                 current_plan: isPro ? 'pro' : converted.current_plan,
                 isProActive: isPro,
