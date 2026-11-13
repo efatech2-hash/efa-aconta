@@ -193,16 +193,24 @@ export async function ensurePatronExistsInSupabase(
       nom_boutique: source?.nom_boutique || 'Ma Boutique',
       pin_hash: source?.pin_hash || '',
       pin_code: source?.pin_code || source?.code_pin || '',
+      code_pin: source?.code_pin || source?.pin_code || '',
+      photo_url: source?.photo_url || source?.photo_profil || null,
+      photo_profil: source?.photo_profil || source?.photo_url || null,
+      photo_devanture: source?.photo_devanture || null,
+      adresse: source?.adresse || null,
+      abonnement_expire:
+        source?.abonnement_expire ||
+        source?.subscription_end_date ||
+        source?.trial_end_date ||
+        new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
       genre: source?.genre === 'homme' ? 'homme' : 'femme',
       role: 'patron',
       subscription_status: source?.subscription_status || 'trial',
+      date_inscription: source?.date_inscription || source?.created_at || new Date().toISOString(),
       created_at: source?.created_at || new Date().toISOString(),
     };
 
-    const { error: upsertErr }: any = await withTimeout(
-      supabase.from('patrons').upsert(patronRow, { onConflict: 'id' }),
-      4000
-    );
+    const { error: upsertErr } = await safeSupabaseWrite('patrons', 'upsert', patronRow);
 
     if (upsertErr) {
       // Fallback minimal si une colonne optionnelle manquait sur l'instance
@@ -276,3 +284,167 @@ export function buildDepenseSupabasePayload(input: {
   };
 }
 
+/**
+ * Exécute un upsert ou update Supabase en retirant automatiquement les éventuelles colonnes
+ * absentes du cache schéma (PGRST204 / 42703) sans jamais avaler silencieusement les autres erreurs.
+ */
+export async function safeSupabaseWrite(
+  tableName: string,
+  operation: 'upsert' | 'update',
+  payload: Record<string, any>,
+  matchEq?: { column: string; value: string }
+): Promise<{ data: any; error: any }> {
+  const cleanPayload: Record<string, any> = { ...payload };
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const query =
+      operation === 'upsert'
+        ? supabase.from(tableName).upsert(cleanPayload, { onConflict: 'id' })
+        : supabase
+            .from(tableName)
+            .update(cleanPayload)
+            .eq(matchEq?.column || 'id', matchEq?.value || cleanPayload.id);
+
+    const res: any = await withTimeout(query, 5000);
+    if (!res?.error) {
+      return { data: res?.data ?? null, error: null };
+    }
+
+    const code = String(res.error?.code || '');
+    const msg = String(res.error?.message || '');
+    const isMissingCol =
+      code === 'PGRST204' ||
+      code === '42703' ||
+      msg.includes('schema cache') ||
+      msg.includes('column');
+
+    if (!isMissingCol) {
+      return { data: null, error: res.error };
+    }
+
+    // Extraire le nom de la colonne manquante dans le message Postgres / PostgREST
+    const matchPgrst = msg.match(/'([a-zA-Z0-9_]+)'\s+column/);
+    const matchPg = msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?"?([a-zA-Z0-9_]+)"?\s+does not exist/i);
+    const badCol = matchPgrst?.[1] || matchPg?.[1];
+
+    if (badCol && badCol in cleanPayload && Object.keys(cleanPayload).length > 1) {
+      console.warn(`[safeSupabaseWrite] Colonne absente ignorée sur ${tableName}.${badCol}`);
+      delete cleanPayload[badCol];
+      continue;
+    }
+
+    return { data: null, error: res.error };
+  }
+  return { data: null, error: new Error(`Trop de tentatives écriture sur ${tableName}`) };
+}
+
+/**
+ * Calcule le montant réellement payé sur une vente à crédit à déduire de la caisse
+ * lors de la suppression de CETTE vente uniquement (jamais le crédit impayé).
+ */
+export function computeCreditSalePaidAmount(
+  vente: { montant_total?: number; reste_a_payer?: number },
+  matchedCredit?: { montant_paye?: number; montant_total?: number; montant_initial?: number; reste_a_payer?: number } | null
+): number {
+  if (matchedCredit) {
+    if (typeof matchedCredit.montant_paye === 'number' && !isNaN(matchedCredit.montant_paye)) {
+      return Math.max(0, matchedCredit.montant_paye);
+    }
+    const creditTotal = Number(matchedCredit.montant_total ?? matchedCredit.montant_initial ?? vente.montant_total) || 0;
+    const creditReste = Number(matchedCredit.reste_a_payer) || 0;
+    return Math.max(0, creditTotal - creditReste);
+  }
+  const venteReste = Number(vente.reste_a_payer) || 0;
+  if (venteReste > 0) {
+    return Math.max(0, (Number(vente.montant_total) || 0) - venteReste);
+  }
+  // Sans trace de crédit ni reste_a_payer > 0 sur une vente à crédit, ne rien retirer en trop par erreur
+  return 0;
+}
+
+/**
+ * RÈGLE 3 PRODUITS :
+ * Avant INSERT dans `produits`, vérifie que `patron_id` existe dans `patrons`,
+ * sinon utilise/insère le patron actuel. Ne laisse JAMAIS l'erreur 23503 bloquer l'ajout d'un produit.
+ * Miroir automatique vers `aconta_produits`.
+ */
+export async function upsertProduitSafely(
+  produitRow: Record<string, any>,
+  currentPatron?: Partial<Patron> | null
+): Promise<{ error: any; resolvedPatronId: string }> {
+  const activeId = currentPatron?.id || produitRow.boutique_id || produitRow.patron_id || '';
+  const requestedPatronId = produitRow.patron_id || activeId;
+
+  // 1. Vérifier/garantir que patron_id existe dans `patrons`
+  let resolvedPatronId = await ensurePatronExistsInSupabase(requestedPatronId, currentPatron);
+  if (!resolvedPatronId && activeId) {
+    resolvedPatronId = await ensurePatronExistsInSupabase(activeId, currentPatron);
+  }
+
+  // Vérifier directement si resolvedPatronId existe bien en base `patrons`, sinon basculer sur activeId (patron actuel)
+  if (typeof navigator !== 'undefined' && navigator.onLine && resolvedPatronId) {
+    try {
+      const { data: patCheck } = await withTimeout(
+        supabase.from('patrons').select('id').eq('id', resolvedPatronId).maybeSingle(),
+        3500
+      );
+      if (!patCheck?.id && activeId && activeId !== resolvedPatronId) {
+        resolvedPatronId = await ensurePatronExistsInSupabase(activeId, currentPatron);
+      }
+    } catch {}
+  }
+
+  const finalPatronId = resolvedPatronId || activeId;
+  const payload: Record<string, any> = {
+    ...produitRow,
+    patron_id: finalPatronId,
+    boutique_id: produitRow.boutique_id || activeId || finalPatronId,
+  };
+
+  let res = await safeSupabaseWrite('produits', 'upsert', payload);
+
+  // 2. Si erreur FK 23503 malgré tout, forcer l'upsert du patron actuel dans `patrons` et réessayer
+  if (res.error && String(res.error?.code || '') === '23503') {
+    clearPatronVerificationCache(finalPatronId);
+    if (activeId) clearPatronVerificationCache(activeId);
+
+    const fallbackPatronId = activeId || finalPatronId;
+    await ensurePatronExistsInSupabase(fallbackPatronId, currentPatron);
+    await safeSupabaseWrite('patrons', 'upsert', {
+      id: fallbackPatronId,
+      nom: currentPatron?.nom || 'Patron',
+      nom_boutique: currentPatron?.nom_boutique || 'Ma Boutique',
+      telephone: currentPatron?.telephone || '',
+      code_pin: currentPatron?.code_pin || currentPatron?.pin_code || '',
+      pin_code: currentPatron?.pin_code || currentPatron?.code_pin || '',
+      abonnement_expire:
+        currentPatron?.abonnement_expire ||
+        currentPatron?.subscription_end_date ||
+        new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    res = await safeSupabaseWrite('produits', 'upsert', {
+      ...payload,
+      patron_id: fallbackPatronId,
+    });
+  }
+
+  // 3. Miroir table `aconta_produits`
+  try {
+    await safeSupabaseWrite('aconta_produits', 'upsert', {
+      id: payload.id,
+      user_id: activeId || finalPatronId,
+      patron_id: finalPatronId,
+      boutique_id: payload.boutique_id,
+      nom: payload.nom,
+      categorie: payload.categorie || 'Général',
+      prix_vente: Number(payload.prix_vente) || 0,
+      prix_achat: Number(payload.prix_achat) || 0,
+      stock_qte: Number(payload.stock_qte) || 0,
+      seuil_alerte: Number(payload.seuil_alerte) ?? 5,
+      photo_url: payload.photo_url || '',
+      created_at: payload.created_at || new Date().toISOString(),
+    });
+  } catch {}
+
+  return { error: res.error, resolvedPatronId: finalPatronId };
+}

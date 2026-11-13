@@ -3,7 +3,7 @@
  * EFA ACONTA - Projet Isolé
  *
  * Règle d'or :
- * 1. Supprimer l'image du bucket Supabase 'efa-aconta-produits' : `${user_id}/${produit_id}.webp`
+ * 1. Supprimer l'image du bucket Supabase 'efa-photos' : `${user_id}/${produit_id}.webp`
  * 2. Supprimer l'enregistrement en base (aconta_produits / produits)
  * 3. Supprimer en local dans Dexie db.produits
  */
@@ -13,7 +13,7 @@ import { db } from './db';
 import { queueSyncItem } from './sync';
 import { logAction } from './historique';
 
-export const PRODUCT_STORAGE_BUCKET = 'efa-aconta-produits';
+export const PRODUCT_STORAGE_BUCKET = 'efa-photos';
 
 export interface DeleteProductOptions {
   userId: string; // patron_id ou current_user_id

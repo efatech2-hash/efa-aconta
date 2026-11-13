@@ -241,7 +241,11 @@ export async function processSyncQueue(): Promise<{ syncedCount: number; errors:
         } else if (item.action === 'update') {
           queryPromise = table.update(payloadData).eq('id', item.record_id);
         } else if (item.action === 'delete') {
-          queryPromise = table.delete().eq('id', item.record_id);
+          let delQuery = table.delete().eq('id', item.record_id);
+          if (payloadData?.boutique_id && (item.table_name === 'credits' || item.table_name === 'ventes' || item.table_name === 'depenses')) {
+            delQuery = delQuery.eq('boutique_id', payloadData.boutique_id);
+          }
+          queryPromise = delQuery;
         } else {
           if (item.id) await db.syncQueue.delete(item.id);
           continue;

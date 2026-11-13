@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import type { Patron, SubscriptionStatus } from '../lib/types';
 import { BoutonRetour } from './BoutonRetour';
-import { getSubscriptionUsage, PLAN_CONFIGS } from '../lib/checkLimits';
+import { getSubscriptionUsage, PLAN_CONFIGS, getTrialEndDateFromPatron } from '../lib/checkLimits';
 
 interface MonAbonnementScreenProps {
   patron: Patron;
@@ -127,7 +127,7 @@ export const MonAbonnementScreen: React.FC<MonAbonnementScreenProps> = ({
                 {patron.subscription_end_date
                   ? `Valide jusqu'au ${new Date(patron.subscription_end_date).toLocaleDateString('fr-FR')}`
                   : isTrial
-                  ? `Essai gratuit en cours jusqu'au ${new Date(patron.trial_end_date || Date.now()).toLocaleDateString('fr-FR')}`
+                  ? `Essai gratuit en cours jusqu'au ${new Date(getTrialEndDateFromPatron(patron)?.getTime() || patron.trial_end_date || Date.now()).toLocaleDateString('fr-FR')}`
                   : 'Sans engagement'}
               </span>
             </p>

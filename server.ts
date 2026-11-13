@@ -39,8 +39,19 @@ app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // Supabase client pour le backend (Zéro clé en clair dans le code)
 const supabaseUrl = (process.env.VITE_SUPABASE_URL || 'https://ebqhujxkliutkkhgsekd.supabase.co').trim();
-const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const resolvedSupabaseKey = (
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  ''
+).trim();
+if (!resolvedSupabaseKey) {
+  console.warn("⚠️ [Security] VITE_SUPABASE_ANON_KEY manquante dans l'environnement local (mode serveur local hors-ligne).");
+}
+const supabase = createClient(
+  supabaseUrl,
+  resolvedSupabaseKey || 'dummy_supabase_anon_key_for_offline_and_scripts'
+);
 
 // ==============================================================================
 // RATE LIMITING ANTI-BRUTE FORCE (SLIDING WINDOW)
@@ -843,8 +854,17 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
 
     const { boutique_id, duration_days, plan, amount } = parsed.data;
     const expiryDate = new Date(Date.now() + duration_days * 24 * 60 * 60 * 1000).toISOString();
+    const normalizedPlan = plan.toLowerCase().trim();
+    const isProPlan =
+      (normalizedPlan === 'pro' || normalizedPlan.startsWith('pro_')) &&
+      !normalizedPlan.includes('prolonge') &&
+      !normalizedPlan.includes('populaire');
+    const targetStatus = isProPlan ? 'pro' : 'populaire';
 
-    const isAnnuel = duration_days >= 360 || plan.includes('annuel') || amount === 90000 || amount === 16500;
+    const isAnnuel =
+      !normalizedPlan.includes('6mois') &&
+      !normalizedPlan.includes('prolonge') &&
+      (duration_days >= 360 || normalizedPlan.includes('annuel') || amount === 90000 || amount === 16500);
     const nowIso = new Date().toISOString();
     const paymentId = 'pay_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
     const subId = 'sub_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
@@ -883,7 +903,7 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
         .update({
           subscription_end_date: expiryDate,
           subscription_end: expiryDate,
-          has_paid_annuel: isAnnuel,
+          ...(isAnnuel ? { has_paid_annuel: true } : {}),
           plan,
           status: 'active',
           is_active: true,
@@ -902,14 +922,19 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
         .eq('id', boutique_id);
     } catch (e) {}
 
-
     try {
       await supabase
         .from('patrons')
         .update({
-          subscription_status: plan,
+          plan,
+          forfait: plan,
+          subscription_status: targetStatus,
           subscription_end_date: expiryDate,
+          subscription_end: expiryDate,
+          fin_abonnement: expiryDate,
           abonnement_expire: expiryDate,
+          statut: 'ACTIF',
+          prix: amount,
           is_active: true,
           last_payment_amount: amount,
         })
@@ -927,31 +952,129 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
       });
     } catch (e) {}
 
-    // Règle d'or Parrainage : Bonus +2 Mois pour Parrain ET Filleul si 1 AN payé
-    if (duration_days >= 360 || plan.includes('annuel') || amount === 90000 || amount === 16500) {
+    // Règle d'or Parrainage : Bonus +60 jours au PARRAIN SEUL (jamais le filleul : paye 11 mois / 12), 1 seule fois par patron principal, jamais btq_sub_
+    if (isAnnuel && boutique_id && !boutique_id.startsWith('btq_sub_')) {
       try {
-        // Tentative RPC Supabase
-        const { data: rpcRes } = await (supabase.rpc as any)('reward_referral_bonus', { target_filleul_id: boutique_id });
-        if (!rpcRes?.success) {
-          // Fallback direct tables
-          const { data: refRow } = await supabase.from('referrals').select('*').eq('filleul_id', boutique_id).maybeSingle();
-          if (refRow && !refRow.reward_given) {
-            await supabase.from('referrals').update({ status: 'paid', reward_given: true, reward_date: new Date().toISOString() }).eq('id', refRow.id);
+        const { data: filleulBtq } = await supabase
+          .from('boutiques')
+          .select('id, patron_id, referred_by, referred_by_code, referral_bonus_given')
+          .eq('id', boutique_id)
+          .maybeSingle();
 
-            // Extension +2 mois (+60j) pour le parrain
-            const { data: parrainBtq } = await supabase.from('boutiques').select('subscription_end, subscription_end_date').eq('id', refRow.parrain_id).maybeSingle();
-            const now = new Date();
-            let pBase = now;
-            const pEnd = parrainBtq?.subscription_end_date || parrainBtq?.subscription_end;
-            if (pEnd && new Date(pEnd) > now) pBase = new Date(pEnd);
-            const pNewEnd = new Date(pBase.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
-            await supabase.from('boutiques').update({ subscription_end: pNewEnd, subscription_end_date: pNewEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', refRow.parrain_id);
-            await supabase.from('profiles').update({ subscription_end_date: pNewEnd }).eq('id', refRow.parrain_id);
+        const isSecondaryBtq = Boolean(filleulBtq?.patron_id && filleulBtq.patron_id !== boutique_id);
+        if (!isSecondaryBtq && !filleulBtq?.referral_bonus_given) {
+          const { data: parrRows } = await supabase
+            .from('parrainage')
+            .select('id, status, mois_gagnes, date_abo_1an, parrain_id')
+            .eq('filleul_id', boutique_id);
 
-            // Extension +2 mois (+60j) pour le filleul
-            const fNewEnd = new Date(new Date(expiryDate).getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
-            await supabase.from('boutiques').update({ subscription_end: fNewEnd, subscription_end_date: fNewEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', boutique_id);
-            await supabase.from('profiles').update({ subscription_end_date: fNewEnd }).eq('id', boutique_id);
+          const alreadyInParrainage =
+            Array.isArray(parrRows) &&
+            parrRows.some(
+              (r: any) =>
+                r.status === 'valide' ||
+                r.status === 'paid' ||
+                Number(r.mois_gagnes) > 0 ||
+                Boolean(r.date_abo_1an)
+            );
+
+          const { data: refRows } = await supabase
+            .from('referrals')
+            .select('id, parrain_id, status, reward_given')
+            .eq('filleul_id', boutique_id);
+
+          const alreadyInReferrals =
+            Array.isArray(refRows) &&
+            refRows.some((r: any) => r.reward_given === true || r.status === 'paid');
+
+          if (!alreadyInParrainage && !alreadyInReferrals) {
+            let parrainId: string | null =
+              (Array.isArray(refRows) && refRows[0]?.parrain_id) ||
+              (Array.isArray(parrRows) && parrRows[0]?.parrain_id) ||
+              null;
+
+            if (!parrainId) {
+              const refCode = (filleulBtq?.referred_by_code || filleulBtq?.referred_by || '').trim().toUpperCase();
+              if (refCode) {
+                const { data: pBtq } = await supabase
+                  .from('boutiques')
+                  .select('id, patron_id')
+                  .or(`referral_code.eq.${refCode},code_parrainage.eq.${refCode}`)
+                  .limit(1)
+                  .maybeSingle();
+                if (pBtq?.id) parrainId = pBtq.patron_id && pBtq.patron_id !== pBtq.id ? pBtq.patron_id : pBtq.id;
+              }
+            }
+
+            if (parrainId && parrainId !== boutique_id) {
+              const rewardNowIso = new Date().toISOString();
+              if (Array.isArray(refRows) && refRows[0]?.id) {
+                await supabase
+                  .from('referrals')
+                  .update({ status: 'paid', reward_given: true, reward_date: rewardNowIso, filleul_plan: plan })
+                  .eq('id', refRows[0].id);
+              }
+              if (Array.isArray(parrRows) && parrRows[0]?.id) {
+                await supabase
+                  .from('parrainage')
+                  .update({ status: 'valide', mois_gagnes: 2, date_abo_1an: rewardNowIso })
+                  .eq('id', parrRows[0].id);
+              }
+
+              // Extension +60 jours pour le PARRAIN SEUL (jamais le filleul)
+              const { data: parrainBtq } = await supabase
+                .from('boutiques')
+                .select('subscription_end, subscription_end_date, plan')
+                .eq('id', parrainId)
+                .maybeSingle();
+              const now = new Date();
+              let pBase = now;
+              const pEnd = parrainBtq?.subscription_end_date || parrainBtq?.subscription_end;
+              if (pEnd && new Date(pEnd) > now) pBase = new Date(pEnd);
+              const pNewEnd = new Date(pBase.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
+
+              const pRawPlan = (parrainBtq?.plan || '').toLowerCase();
+              const preservedParrainPlan =
+                pRawPlan.includes('populaire') || pRawPlan.includes('16500') || pRawPlan.includes('prolonge')
+                  ? 'populaire'
+                  : pRawPlan.includes('pro')
+                  ? parrainBtq?.plan || 'pro'
+                  : pRawPlan || 'essai';
+
+              await supabase
+                .from('boutiques')
+                .update({
+                  subscription_end: pNewEnd,
+                  subscription_end_date: pNewEnd,
+                  plan: preservedParrainPlan,
+                  is_active: true,
+                  status: 'active',
+                  updated_at: rewardNowIso,
+                })
+                .eq('id', parrainId);
+              await supabase.from('profiles').update({ subscription_end_date: pNewEnd }).eq('id', parrainId);
+              await supabase
+                .from('patrons')
+                .update({
+                  subscription_end: pNewEnd,
+                  subscription_end_date: pNewEnd,
+                  fin_abonnement: pNewEnd,
+                  abonnement_expire: pNewEnd,
+                  is_active: true,
+                  statut: 'ACTIF',
+                })
+                .eq('id', parrainId);
+
+              // Marquer le filleul sans prolonger sa date d'expiration
+              await supabase
+                .from('boutiques')
+                .update({ has_paid_annuel: true, referral_bonus_given: true, updated_at: rewardNowIso })
+                .eq('id', boutique_id);
+              await supabase
+                .from('patrons')
+                .update({ has_paid_annuel: true, referral_bonus_given: true })
+                .eq('id', boutique_id);
+            }
           }
         }
       } catch (refEx) {
@@ -996,15 +1119,47 @@ app.post('/api/admin/boutiques/prolong', requireAdminAuth, async (req: Request, 
       newEnd = new Date(Date.now() + daysToAdd * 86400000).toISOString();
     }
 
+    let preservedPlan = 'populaire';
     try {
-      await supabase.from('boutiques').update({ subscription_end: newEnd, subscription_end_date: newEnd, is_active: true, status: 'active', updated_at: new Date().toISOString() }).eq('id', boutique_id);
+      const { data: existingBtq } = await supabase
+        .from('boutiques')
+        .select('plan, last_payment_amount')
+        .eq('id', boutique_id)
+        .maybeSingle();
+      const rawPlan = (existingBtq?.plan || '').toLowerCase().trim();
+      const amt = Number(existingBtq?.last_payment_amount) || 0;
+      const isExistingPro =
+        !rawPlan.includes('populaire') &&
+        !rawPlan.includes('prolonge') &&
+        !rawPlan.includes('16500') &&
+        (rawPlan === 'pro' || rawPlan.startsWith('pro_') || amt >= 50000);
+      if (isExistingPro) {
+        preservedPlan = existingBtq?.plan || 'pro';
+      }
+    } catch {}
+    const preservedStatus = preservedPlan.toLowerCase().startsWith('pro') ? 'pro' : 'populaire';
+
+    try {
+      await supabase
+        .from('boutiques')
+        .update({
+          plan: preservedPlan,
+          subscription_end: newEnd,
+          subscription_end_date: newEnd,
+          is_active: true,
+          status: 'active',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', boutique_id);
     } catch {}
 
     try {
       await supabase.from('patrons').update({
         fin_abonnement: newEnd,
         statut: 'ACTIF',
-        forfait: 'PROLONGE',
+        plan: preservedPlan,
+        forfait: preservedPlan,
+        subscription_status: preservedStatus,
         subscription_end_date: newEnd,
         abonnement_expire: newEnd,
         is_active: true,

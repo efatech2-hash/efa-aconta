@@ -39,10 +39,10 @@ export const PinLockScreen: React.FC<PinLockScreenProps> = ({
           nom: patron.nom,
           role: 'patron',
           genre: patron.genre || 'femme',
-          photo_url: patron.photo_url,
+          photo_url: patron.photo_url || patron.photo_profil,
           pin_hash: patron.pin_hash,
           pin_code: patron.pin_code,
-          code_pin: patron.pin_code,
+          code_pin: patron.code_pin || patron.pin_code,
         };
       }
       const foundEmp = employes.find((e) => e.id === currentUser.id);
@@ -67,10 +67,10 @@ export const PinLockScreen: React.FC<PinLockScreenProps> = ({
       nom: patron.nom,
       role: 'patron',
       genre: patron.genre || 'femme',
-      photo_url: patron.photo_url,
+      photo_url: patron.photo_url || patron.photo_profil,
       pin_hash: patron.pin_hash,
       pin_code: patron.pin_code,
-      code_pin: patron.pin_code,
+      code_pin: patron.code_pin || patron.pin_code,
     };
   });
 
@@ -78,6 +78,44 @@ export const PinLockScreen: React.FC<PinLockScreenProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isSwitching, setIsSwitching] = useState(false);
+
+  // Garder la photo et le nom à jour dès que Supabase recharge patron / employés
+  useEffect(() => {
+    setSelectedUser((prev) => {
+      if (prev.role === 'patron') {
+        const freshPhoto = patron.photo_url || patron.photo_profil;
+        if (
+          prev.id === patron.id &&
+          prev.nom === patron.nom &&
+          prev.photo_url === freshPhoto
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          id: patron.id,
+          nom: patron.nom,
+          genre: patron.genre || prev.genre,
+          photo_url: freshPhoto,
+          pin_hash: patron.pin_hash || prev.pin_hash,
+          pin_code: patron.pin_code || prev.pin_code,
+          code_pin: patron.code_pin || patron.pin_code || prev.code_pin,
+        };
+      }
+      const freshEmp = employes.find((e) => e.id === prev.id);
+      if (freshEmp && (prev.photo_url !== freshEmp.photo_url || prev.nom !== freshEmp.nom)) {
+        return {
+          ...prev,
+          nom: freshEmp.nom,
+          photo_url: freshEmp.photo_url,
+          pin_hash: freshEmp.pin_hash || prev.pin_hash,
+          pin_code: freshEmp.pin_code || prev.pin_code,
+          code_pin: freshEmp.code_pin || prev.code_pin,
+        };
+      }
+      return prev;
+    });
+  }, [patron.id, patron.nom, patron.photo_url, patron.photo_profil, patron.genre, patron.pin_hash, patron.pin_code, patron.code_pin, employes]);
 
   // Vérification du code PIN quand 4 chiffres sont tapés
   const verifyEnteredPin = useCallback(
@@ -421,10 +459,10 @@ export const PinLockScreen: React.FC<PinLockScreenProps> = ({
                     nom: patron.nom,
                     role: 'patron',
                     genre: patron.genre || 'femme',
-                    photo_url: patron.photo_url,
+                    photo_url: patron.photo_url || patron.photo_profil,
                     pin_hash: patron.pin_hash,
                     pin_code: patron.pin_code,
-                    code_pin: patron.pin_code,
+                    code_pin: patron.code_pin || patron.pin_code,
                   });
                   setEnteredPin('');
                   setErrorMsg(null);

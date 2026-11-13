@@ -179,7 +179,11 @@ export function computeBoutiqueGroups(allBoutiques: AdminBoutique[]): Map<string
     const principale = groupBoutiques[0];
     const pPlan = (principale.plan || '').toLowerCase();
     const pAmt = Number(principale.last_payment_amount) || 0;
-    const isPrincipalePro = pPlan.includes('pro') || pAmt >= 50000;
+    const isPrincipalePro =
+      !pPlan.includes('populaire') &&
+      !pPlan.includes('prolonge') &&
+      !pPlan.includes('16500') &&
+      (pPlan === 'pro' || pPlan.startsWith('pro_') || (pPlan.includes('pro') && !pPlan.includes('prolonge')) || pAmt >= 50000);
 
     groupBoutiques.forEach((btq, index) => {
       const boutiqueIndex = index + 1;
@@ -266,6 +270,10 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
   };
 
   const handleValidateReferralBonus = async (ref: CentralReferralRow) => {
+    if (!ref.filleul_id || ref.filleul_id.startsWith('btq_sub_')) {
+      showToast('Le bonus parrainage ne s’applique qu’au patron principal.', 'error');
+      return;
+    }
     try {
       const res = await checkAndGiveReferralBonus({
         id: ref.filleul_id,
@@ -278,7 +286,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
       if (res.success) {
         showToast(
-          `Bonus +2 mois validé avec succès pour ${ref.filleul_nom || 'le filleul'} et ${ref.parrain_nom || 'le parrain'} !`,
+          `Bonus +60 jours validé pour le parrain (${ref.parrain_nom || 'Parrain'}) ! (Filleul paye 11 mois / 12)`,
           'success'
         );
         await Promise.all([loadBoutiques(), loadReferrals()]);
@@ -620,7 +628,11 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         for (const f of filleulsFromBoutiques) {
           const plan = (f.plan || '').toLowerCase();
           const amt = Number(f.last_payment_amount) || 0;
-          if (f.has_paid_annuel || amt >= 16500 || plan.includes('annuel') || plan.includes('pro')) {
+          if (
+            !plan.includes('6mois') &&
+            !plan.includes('prolonge') &&
+            (f.has_paid_annuel || amt === 90000 || amt === 16500 || plan.includes('annuel'))
+          ) {
             annualFilleulIds.add(f.id);
           }
         }
@@ -634,10 +646,13 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
         // Statut Bonus Reçu pour cette boutique elle-même (en tant que filleul)
         if (item.referred_by) {
+          const itemPlan = (item.plan || '').toLowerCase();
+          const itemAmt = Number(item.last_payment_amount) || 0;
           const isAnnualPayment =
             Boolean(item.has_paid_annuel) ||
-            (Number(item.last_payment_amount) || 0) >= 16500 ||
-            (item.plan || '').toLowerCase().includes('annuel');
+            (!itemPlan.includes('6mois') &&
+              !itemPlan.includes('prolonge') &&
+              (itemAmt === 90000 || itemAmt === 16500 || itemPlan.includes('annuel')));
           const isRewardedInTable = centralReferrals.some(
             (r) => r.filleul_id === item.id && (r.status === 'paid' || r.reward_given === true)
           );
@@ -769,17 +784,20 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     }
     const p = (b.plan || '').toLowerCase();
     const amt = b.last_payment_amount || 0;
-    if (p.includes('pro_annuel') || p.includes('pro 1 an') || (p.includes('pro') && amt === 90000)) {
-      return { label: 'PRO 1 AN - 90K', className: 'bg-blue-600 text-white shadow-xs font-black' };
-    }
-    if (p.includes('pro_6mois') || p.includes('pro 6 mois') || (p.includes('pro') && amt === 50000)) {
-      return { label: 'PRO 6 MOIS - 50K', className: 'bg-purple-600 text-white shadow-xs font-black' };
-    }
     if (p.includes('populaire') || amt === 16500) {
       return { label: 'POPULAIRE 1 AN - 16.5K', className: 'bg-yellow-400 text-slate-950 font-black border border-amber-500 shadow-xs' };
     }
     if (p.includes('prolonge')) {
-      return { label: 'PROLONGÉ 30J', className: 'bg-amber-500 text-slate-950 font-black shadow-xs' };
+      return { label: 'POPULAIRE PROLONGÉ 30J', className: 'bg-amber-500 text-slate-950 font-black shadow-xs' };
+    }
+    if (!p.includes('prolonge') && (p.includes('pro_annuel') || p.includes('pro 1 an') || (p.includes('pro') && amt === 90000))) {
+      return { label: 'PRO 1 AN - 90K', className: 'bg-blue-600 text-white shadow-xs font-black' };
+    }
+    if (!p.includes('prolonge') && (p.includes('pro_6mois') || p.includes('pro 6 mois') || (p.includes('pro') && amt === 50000))) {
+      return { label: 'PRO 6 MOIS - 50K', className: 'bg-purple-600 text-white shadow-xs font-black' };
+    }
+    if (p === 'pro') {
+      return { label: 'BOUTIQUE PRO', className: 'bg-blue-600 text-white shadow-xs font-black' };
     }
     return { label: 'ESSAI 21J', className: 'bg-slate-100 text-slate-700 font-bold border border-slate-300' };
   };
@@ -793,7 +811,12 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
     planCode: string = 'pro'
   ) => {
     const expiryDate = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
-    const targetStatus = planCode.startsWith('pro') ? 'pro' : 'populaire';
+    const normalizedCode = planCode.toLowerCase().trim();
+    const isProCode =
+      (normalizedCode === 'pro' || normalizedCode.startsWith('pro_')) &&
+      !normalizedCode.includes('prolonge') &&
+      !normalizedCode.includes('populaire');
+    const targetStatus = isProCode ? 'pro' : 'populaire';
 
     try {
       // 1. Tenter par l'API backend sécurisée
@@ -911,9 +934,12 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
         'success'
       );
 
-      // 5. RÈGLE D'OR AMBASSADEUR : Bonus +60 jours UNIQUEMENT si forfait ANNUEL
+      // 5. RÈGLE D'OR AMBASSADEUR : Bonus +60 jours UNIQUEMENT si forfait ANNUEL et PATRON PRINCIPAL (1 seule fois)
       // (Boutique Pro 1 An - 90.000F ou Populaire 1 An - 16.500F)
-      if (durationDays >= 365 || planCode === 'pro_annuel' || planCode === 'boutique_pro_annuel' || (planCode === 'populaire' && amount === 16500)) {
+      const isMainPatronAccount =
+        !boutique.id.startsWith('btq_sub_') &&
+        (!boutique.patron_id || boutique.patron_id === boutique.id);
+      if (isMainPatronAccount && (durationDays >= 365 || planCode === 'pro_annuel' || planCode === 'boutique_pro_annuel' || (planCode === 'populaire' && amount === 16500))) {
         try {
           const bonusRes = await checkAndGiveReferralBonus({
             ...boutique,
@@ -987,7 +1013,18 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
 
       console.log("Prolongation OK", nouvelleDate);
 
-      // 1. Update Supabase table boutiques (exact columns only)
+      const existingPlanLower = (boutique.plan || '').toLowerCase().trim();
+      const isExistingPro =
+        !existingPlanLower.includes('populaire') &&
+        !existingPlanLower.includes('prolonge') &&
+        !existingPlanLower.includes('16500') &&
+        (existingPlanLower === 'pro' ||
+          existingPlanLower.startsWith('pro_') ||
+          (Number(boutique.last_payment_amount) || 0) >= 50000);
+      const preservedPlan = isExistingPro ? (boutique.plan || 'pro') : 'populaire';
+      const preservedStatus = isExistingPro ? 'pro' : 'populaire';
+
+      // 1. Update Supabase table boutiques (exact columns only — ne jamais transformer Populaire/Essai en PRO)
       try {
         await supabase
           .from('boutiques')
@@ -996,7 +1033,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             subscription_end: nouvelleDateIso,
             is_active: true,
             status: 'active',
-            plan: 'PROLONGE',
+            plan: preservedPlan,
             updated_at: now.toISOString(),
           })
           .eq('id', boutique.id);
@@ -1012,8 +1049,9 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
             abonnement_expire: nouvelleDateIso,
             statut: 'ACTIF',
             is_active: true,
-            forfait: 'PROLONGE',
-            subscription_status: 'populaire',
+            plan: preservedPlan,
+            forfait: preservedPlan,
+            subscription_status: preservedStatus,
           } as any)
           .eq('id', boutique.id);
       } catch (errP) {}
@@ -1040,7 +1078,7 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                 subscription_end: nouvelleDateIso,
                 status: 'actif',
                 is_active: true,
-                plan: 'PROLONGE',
+                plan: preservedPlan,
               }
             : item
         )
@@ -2200,10 +2238,10 @@ export const SuperAdminScreen: React.FC<SuperAdminScreenProps> = ({ onNavigateTo
                       <thead>
                         <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-black uppercase tracking-wider text-slate-500">
                           <th className="py-3.5 px-4">Date & Réf</th>
-                          <th className="py-3.5 px-4">Parrain (Bénéficiaire 1)</th>
-                          <th className="py-3.5 px-4">Filleul (Bénéficiaire 2)</th>
+                          <th className="py-3.5 px-4">Parrain (Bénéficiaire +60j)</th>
+                          <th className="py-3.5 px-4">Filleul (Paye 11 mois / 12)</th>
                           <th className="py-3.5 px-4 text-center">Statut Parrainage</th>
-                          <th className="py-3.5 px-4 text-center">Récompense +2 Mois (60j)</th>
+                          <th className="py-3.5 px-4 text-center">Bonus Parrain (+60j / 1 fois)</th>
                           <th className="py-3.5 px-4 text-right">Action Super Admin</th>
                         </tr>
                       </thead>

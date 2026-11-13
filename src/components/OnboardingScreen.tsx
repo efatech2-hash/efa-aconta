@@ -182,23 +182,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
       // Synchronisation vers Supabase
       await queueSyncItem('patrons', 'insert', patronId, newPatron);
 
-      // Correction 10 : Génération du lien de parrainage avec slug
-      const cleanNomSlug = nom.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const uniqueSlug = `efa-${cleanNomSlug || 'boutique'}-${Math.floor(Math.random() * 8999 + 1000)}`;
-      await db.parrainage.put({
-        id: 'parr-init-' + Date.now(),
-        parrain_id: patronId,
-        filleul_nom: 'Exemple Filleule',
-        lien_code: uniqueSlug,
-        filleul_phone: '+228 90 00 00 00',
-        status: 'attente',
-        mois_gagnes: 0,
-        clics: 0,
-        conversions: 0,
-        date_inscription: new Date().toISOString(),
-      });
-
-      // Si inscrit via parrain, incrémenter conversion
+      // Si inscrit via parrain, log discret
       if (parrainRef) {
         console.log(`[Parrainage] Inscrit via code invitation: ${parrainRef}`);
       }

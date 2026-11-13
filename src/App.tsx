@@ -50,6 +50,8 @@ import {
   resolveMainPatronId,
   buildCreditSupabasePayload,
   buildDepenseSupabasePayload,
+  safeSupabaseWrite,
+  upsertProduitSafely,
 } from './lib/supabaseHelper';
 import CheckAbonnement from './components/CheckAbonnement';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
@@ -396,30 +398,91 @@ export default function App() {
             }
           }
 
+          // Rechargement direct depuis Supabase à chaque ouverture (patrons + boutiques, jamais cache local seul)
+          const mainIdCandidate =
+            bDataRecord?.patron_id ||
+            currentPatron?.parentId ||
+            currentPatron?.ownerId ||
+            (currentPatron as any)?.patron_id ||
+            currentBoutiqueId;
+
+          let remotePatron: any = null;
+          try {
+            const { data: rp }: any = await withTimeout(
+              supabase.from('patrons').select('*').eq('id', mainIdCandidate).limit(1).maybeSingle(),
+              4000
+            );
+            if (rp) remotePatron = rp;
+          } catch {}
+
           if (bDataRecord) {
             const rawPlan = (bDataRecord.plan || bDataRecord.forfait || '').toLowerCase().trim();
             const rawStatus = (bDataRecord.status || bDataRecord.statut || '').toLowerCase().trim();
             const subEndDate = bDataRecord.subscription_end_date || bDataRecord.subscription_end || bDataRecord.fin_abonnement;
             const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
-            const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
-            const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number(bDataRecord.last_payment_amount) >= 50000;
+            const isPopulaire =
+              rawPlan === 'populaire' ||
+              rawPlan.includes('populaire') ||
+              rawPlan.includes('16500') ||
+              rawPlan.includes('prolonge');
+            const isPro =
+              !isPopulaire &&
+              (rawPlan === 'pro' ||
+                (rawPlan.includes('pro') && !rawPlan.includes('prolonge')) ||
+                Number(bDataRecord.last_payment_amount) >= 50000);
 
             const converted = boutiqueToPatron(bDataRecord);
+            const mainDateInscription =
+              remotePatron?.date_inscription ||
+              remotePatron?.created_at ||
+              currentPatron?.date_inscription ||
+              (!converted.parentId ? bDataRecord.created_at : undefined) ||
+              converted.created_at;
+            const freshPatronPhoto = remotePatron
+              ? (remotePatron.photo_url || remotePatron.photo_profil || undefined)
+              : (currentPatron?.photo_url || currentPatron?.photo_profil || undefined);
+            const freshReferralCode =
+              remotePatron?.code_parrainage ||
+              remotePatron?.referral_code ||
+              bDataRecord.code_parrainage ||
+              bDataRecord.referral_code ||
+              converted.referral_code;
+            const freshReferredBy =
+              remotePatron?.referred_by ??
+              bDataRecord.referred_by ??
+              bDataRecord.referred_by_code ??
+              null;
+
+            const freshGenre: 'homme' | 'femme' =
+              remotePatron?.genre === 'homme' || remotePatron?.genre === 'femme'
+                ? remotePatron.genre
+                : bDataRecord?.genre === 'homme' || bDataRecord?.genre === 'femme'
+                ? bDataRecord.genre
+                : currentPatron?.genre === 'homme'
+                ? 'homme'
+                : 'femme';
+
             if (currentPatron) {
               const resolvedParent = converted.parentId || currentPatron.parentId || null;
               const resolvedOwner = resolvedParent || converted.ownerId || currentPatron.ownerId || currentPatron.id;
               currentPatron = {
                 ...currentPatron,
                 ...converted,
+                nom: (!resolvedParent && remotePatron?.nom) ? remotePatron.nom : converted.nom,
+                genre: freshGenre,
                 parentId: resolvedParent,
                 ownerId: resolvedOwner,
                 patron_id: resolvedOwner,
                 type: converted.type || (resolvedParent ? 'SUB' : currentPatron.type),
-                photo_url: bDataRecord.photo_url || bDataRecord.photo_profil || currentPatron.photo_url || converted.photo_url,
-                photo_devanture: bDataRecord.photo_devanture || bDataRecord.devanture_url || currentPatron.photo_devanture || converted.photo_devanture,
-                adresse: bDataRecord.adresse || bDataRecord.adresse_boutique || currentPatron.adresse || converted.adresse,
-                subscription_status: isPro ? 'pro' : converted.subscription_status,
-                current_plan: isPro ? 'pro' : converted.current_plan,
+                photo_url: freshPatronPhoto,
+                photo_profil: freshPatronPhoto,
+                referral_code: freshReferralCode,
+                code_parrainage: freshReferralCode,
+                referred_by: freshReferredBy,
+                date_inscription: mainDateInscription,
+                trial_start_date: mainDateInscription,
+                subscription_status: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.subscription_status,
+                current_plan: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.current_plan,
                 isProActive: isPro,
                 statut: isStatusActive ? 'ACTIF' : currentPatron.statut,
                 subscription_end_date: subEndDate || currentPatron.subscription_end_date,
@@ -428,57 +491,83 @@ export default function App() {
                 code_pin: currentPatron.code_pin || converted.code_pin,
               };
             } else {
-              currentPatron = converted;
+              currentPatron = {
+                ...converted,
+                nom: (!converted.parentId && remotePatron?.nom) ? remotePatron.nom : converted.nom,
+                genre: freshGenre,
+                photo_url: freshPatronPhoto,
+                photo_profil: freshPatronPhoto,
+                referral_code: freshReferralCode,
+                code_parrainage: freshReferralCode,
+                referred_by: freshReferredBy,
+                date_inscription: mainDateInscription,
+                trial_start_date: mainDateInscription,
+                subscription_status: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.subscription_status,
+                current_plan: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.current_plan,
+                isProActive: isPro,
+              };
             }
             await db.patrons.put(currentPatron);
-          } else {
-            // Fallback table patrons: UNIQUEMENT pour nom/pin/solde, JAMAIS pour subscription_status !
-            const query = supabase
-              .from('patrons')
-              .select('*')
-              .eq('id', currentBoutiqueId)
-              .limit(1)
-              .maybeSingle();
-            const { data: remotePatron }: any = await withTimeout(query, 4000);
-            if (remotePatron) {
-              const realPin =
-                remotePatron.pin_code ||
-                remotePatron.code_pin ||
-                remotePatron.mot_de_passe ||
-                remotePatron.password;
-              if (currentPatron) {
-                currentPatron = {
-                  ...currentPatron,
-                  nom: remotePatron.nom || currentPatron.nom,
-                  nom_boutique: remotePatron.nom_boutique || currentPatron.nom_boutique,
-                  solde: typeof remotePatron.solde === 'number' ? remotePatron.solde : (currentPatron.solde ?? 0),
-                  pin_code: realPin !== undefined ? realPin : currentPatron.pin_code,
-                  code_pin: realPin !== undefined ? realPin : currentPatron.code_pin,
-                  pin_hash: remotePatron.pin_hash || currentPatron.pin_hash,
-                };
-              } else {
-                currentPatron = {
-                  id: remotePatron.id || currentBoutiqueId,
-                  nom: remotePatron.nom || 'Patron',
-                  telephone: remotePatron.telephone || '',
-                  phone_country: remotePatron.phone_country || '+228',
-                  phone_number: remotePatron.phone_number || '',
-                  phone_full: remotePatron.phone_full || remotePatron.telephone || '',
-                  nom_boutique: remotePatron.nom_boutique || 'Ma Boutique',
-                  pin_code: realPin || '',
-                  code_pin: realPin || '',
-                  pin_hash: remotePatron.pin_hash || '',
-                  genre: remotePatron.genre || 'femme',
-                  role: 'patron',
-                  solde: Number(remotePatron.solde) || 0,
-                  abonnement_expire: new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
-                  subscription_status: 'trial',
-                  created_at: remotePatron.created_at || new Date().toISOString(),
-                };
-              }
-              if (currentPatron) {
-                await db.patrons.put(currentPatron);
-              }
+          } else if (remotePatron) {
+            const realPin =
+              remotePatron.pin_code ||
+              remotePatron.code_pin ||
+              remotePatron.mot_de_passe ||
+              remotePatron.password;
+            const freshPatronPhoto = remotePatron.photo_url || remotePatron.photo_profil || undefined;
+            const freshReferralCode = remotePatron.code_parrainage || remotePatron.referral_code || undefined;
+            const mainDateInscription = remotePatron.date_inscription || remotePatron.created_at || currentPatron?.date_inscription;
+            if (currentPatron) {
+              currentPatron = {
+                ...currentPatron,
+                nom: remotePatron.nom || currentPatron.nom,
+                nom_boutique: remotePatron.nom_boutique || currentPatron.nom_boutique,
+                genre: remotePatron.genre === 'homme' ? 'homme' : (remotePatron.genre === 'femme' ? 'femme' : currentPatron.genre),
+                photo_url: freshPatronPhoto,
+                photo_profil: freshPatronPhoto,
+                code_parrainage: freshReferralCode,
+                referral_code: freshReferralCode,
+                referred_by: remotePatron.referred_by ?? null,
+                date_inscription: mainDateInscription || currentPatron.created_at,
+                trial_start_date: mainDateInscription || currentPatron.trial_start_date,
+                solde: typeof remotePatron.solde === 'number' ? remotePatron.solde : (currentPatron.solde ?? 0),
+                pin_code: realPin !== undefined ? realPin : currentPatron.pin_code,
+                code_pin: realPin !== undefined ? realPin : currentPatron.code_pin,
+                pin_hash: remotePatron.pin_hash || currentPatron.pin_hash,
+                abonnement_expire: remotePatron.abonnement_expire || currentPatron.abonnement_expire,
+              };
+            } else {
+              currentPatron = {
+                id: remotePatron.id || currentBoutiqueId,
+                nom: remotePatron.nom || 'Patron',
+                telephone: remotePatron.telephone || '',
+                phone_country: remotePatron.phone_country || '+228',
+                phone_number: remotePatron.phone_number || '',
+                phone_full: remotePatron.phone_full || remotePatron.telephone || '',
+                nom_boutique: remotePatron.nom_boutique || 'Ma Boutique',
+                photo_url: freshPatronPhoto,
+                photo_profil: freshPatronPhoto,
+                code_parrainage: freshReferralCode,
+                referral_code: freshReferralCode,
+                referred_by: remotePatron.referred_by ?? null,
+                date_inscription: mainDateInscription || new Date().toISOString(),
+                trial_start_date: mainDateInscription || new Date().toISOString(),
+                pin_code: realPin || '',
+                code_pin: realPin || '',
+                pin_hash: remotePatron.pin_hash || '',
+                genre: remotePatron.genre || 'femme',
+                role: 'patron',
+                solde: Number(remotePatron.solde) || 0,
+                abonnement_expire:
+                  remotePatron.abonnement_expire ||
+                  remotePatron.subscription_end_date ||
+                  new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
+                subscription_status: 'trial',
+                created_at: remotePatron.created_at || new Date().toISOString(),
+              };
+            }
+            if (currentPatron) {
+              await db.patrons.put(currentPatron);
             }
           }
         } catch (syncErr) {
@@ -493,40 +582,67 @@ export default function App() {
         const now = new Date();
         let patronNeedsUpdate = false;
 
-        // RÈGLE : Si PRO actif (lu depuis boutiques), ne JAMAIS forcer trial ni expiré !
+        // RÈGLE : Si PRO actif ou POPULAIRE actif, ne JAMAIS forcer trial !
         if (currentPatron.isProActive || currentPatron.subscription_status === 'pro') {
           currentPatron.subscription_status = 'pro';
           currentPatron.current_plan = 'pro';
           currentPatron.isProActive = true;
           currentPatron.statut = 'ACTIF';
+        } else if (currentPatron.subscription_status === 'populaire') {
+          currentPatron.subscription_status = 'populaire';
+          currentPatron.current_plan = 'populaire';
+          currentPatron.isProActive = false;
+          currentPatron.statut = 'ACTIF';
         } else {
-          if (!currentPatron.trial_start_date) {
-            const created = new Date(currentPatron.created_at || Date.now());
-            const trialEnd = new Date(created.getTime() + 21 * 24 * 60 * 60 * 1000);
-            currentPatron.trial_start_date = created.toISOString();
-            currentPatron.trial_end_date = trialEnd.toISOString();
-            currentPatron.subscription_status = 'trial';
-            currentPatron.subscription_end_date = trialEnd.toISOString();
-            patronNeedsUpdate = true;
-          }
-          if (
-            (currentPatron.subscription_status === 'trial' || !currentPatron.subscription_status) &&
-            currentPatron.trial_end_date &&
-            now > new Date(currentPatron.trial_end_date)
-          ) {
+          // Calcul strict des 21 jours d'essai depuis patrons.date_inscription (jamais depuis boutique secondaire)
+          const inscriptionSource =
+            currentPatron.date_inscription ||
+            currentPatron.trial_start_date ||
+            (!currentPatron.parentId ? currentPatron.created_at : undefined) ||
+            new Date().toISOString();
+          const created = new Date(inscriptionSource);
+          const trialEnd = new Date(created.getTime() + 21 * 24 * 60 * 60 * 1000);
+          currentPatron.date_inscription = created.toISOString();
+          currentPatron.trial_start_date = created.toISOString();
+          currentPatron.trial_end_date = trialEnd.toISOString();
+          currentPatron.subscription_end_date = currentPatron.subscription_end_date || trialEnd.toISOString();
+          if (now > trialEnd) {
             currentPatron.subscription_status = 'expired';
+            patronNeedsUpdate = true;
+          } else if (currentPatron.subscription_status !== 'trial') {
+            currentPatron.subscription_status = 'trial';
             patronNeedsUpdate = true;
           }
         }
 
-        if (!currentPatron.referral_code) {
-          currentPatron.referral_code = generateReferralCode();
+        const resolvedCode = currentPatron.code_parrainage || currentPatron.referral_code;
+        if (!resolvedCode) {
+          const generatedCode = generateReferralCode();
+          currentPatron.referral_code = generatedCode;
+          currentPatron.code_parrainage = generatedCode;
           patronNeedsUpdate = true;
+          if (typeof navigator !== 'undefined' && navigator.onLine) {
+            const codeTargetId = currentPatron.parentId || currentPatron.patron_id || currentPatron.id;
+            safeSupabaseWrite(
+              'patrons',
+              'update',
+              { code_parrainage: generatedCode, referral_code: generatedCode },
+              { column: 'id', value: codeTargetId }
+            ).catch(() => {});
+            safeSupabaseWrite(
+              'boutiques',
+              'update',
+              { code_parrainage: generatedCode, referral_code: generatedCode },
+              { column: 'id', value: currentPatron.id }
+            ).catch(() => {});
+          }
+        } else {
+          currentPatron.referral_code = resolvedCode;
+          currentPatron.code_parrainage = resolvedCode;
         }
 
         if (patronNeedsUpdate) {
           await db.patrons.put(currentPatron);
-          await queueSyncItem('patrons', 'update', currentPatron.id, currentPatron);
         }
         setPatron(currentPatron);
         if (typeof window !== 'undefined') localStorage.setItem('entreprise_id', currentPatron.id);
@@ -549,7 +665,17 @@ export default function App() {
                 .select('*')
                 .eq('id', patronOwnerId)
                 .maybeSingle();
-              if (parentBtq && (parentBtq.plan === 'pro' || Number(parentBtq.last_payment_amount) >= 50000 || isProActive(parentBtq as any))) {
+              const pParentPlan = (parentBtq?.plan || '').toLowerCase().trim();
+              const isParentBtqPro =
+                Boolean(parentBtq) &&
+                !pParentPlan.includes('populaire') &&
+                !pParentPlan.includes('prolonge') &&
+                !pParentPlan.includes('16500') &&
+                (pParentPlan === 'pro' ||
+                  pParentPlan.startsWith('pro_') ||
+                  Number(parentBtq?.last_payment_amount) >= 50000 ||
+                  isProActive(parentBtq as any));
+              if (isParentBtqPro && parentBtq) {
                 currentPatron.subscription_status = 'pro';
                 currentPatron.current_plan = 'pro';
                 currentPatron.isProActive = true;
@@ -572,7 +698,14 @@ export default function App() {
                 .order('created_at', { ascending: true });
               if (siblings && siblings.length > 1) {
                 const mainSibling = siblings[0];
-                const isMainPro = mainSibling.plan === 'pro' || Number(mainSibling.last_payment_amount) >= 50000;
+                const sibPlan = (mainSibling.plan || '').toLowerCase().trim();
+                const isMainPro =
+                  !sibPlan.includes('populaire') &&
+                  !sibPlan.includes('prolonge') &&
+                  !sibPlan.includes('16500') &&
+                  (sibPlan === 'pro' ||
+                    sibPlan.startsWith('pro_') ||
+                    Number(mainSibling.last_payment_amount) >= 50000);
                 if (isMainPro && mainSibling.id !== currentPatron.id) {
                   currentPatron.subscription_status = 'pro';
                   currentPatron.current_plan = 'pro';
@@ -607,21 +740,29 @@ export default function App() {
               .order('created_at', { ascending: false });
 
             if (!prodErr && remoteProds && remoteProds.length > 0) {
-              await db.produits.bulkPut(
-                remoteProds.map((p) => ({
-                  id: p.id,
-                  boutique_id: p.boutique_id || currentBoutiqueId,
-                  patron_id: p.patron_id || resolvedMainPatronId,
-                  nom: p.nom,
-                  prix_achat: Number(p.prix_achat) || 0,
-                  prix_vente: Number(p.prix_vente) || 0,
-                  stock_qte: Number(p.stock_qte) || 0,
-                  seuil_alerte: Number(p.seuil_alerte) ?? 5,
-                  categorie: p.categorie || 'Général',
-                  photo_url: p.photo_url || '',
-                  created_at: p.created_at || new Date().toISOString(),
-                }))
+              const activeRemoteProds = remoteProds.filter(
+                (p: any) => p.status !== 'deleted' && p.is_deleted !== true
               );
+              if (activeRemoteProds.length > 0) {
+                await db.produits.bulkPut(
+                  activeRemoteProds.map((p: any) => ({
+                    id: p.id,
+                    boutique_id: p.boutique_id || currentBoutiqueId,
+                    patron_id: p.patron_id || resolvedMainPatronId,
+                    nom: p.nom,
+                    prix_achat: Number(p.prix_achat) || 0,
+                    prix_vente: Number(p.prix_vente) || 0,
+                    stock_qte: Number(p.stock_qte) || 0,
+                    seuil_alerte: Number(p.seuil_alerte) ?? 5,
+                    categorie: p.categorie || 'Général',
+                    photo_url: p.photo_url || '',
+                    status: p.status || 'active',
+                    is_deleted: Boolean(p.is_deleted),
+                    synced: true,
+                    created_at: p.created_at || new Date().toISOString(),
+                  }))
+                );
+              }
             }
 
             // C. Rechargement des employés depuis Supabase (sans jamais effacer le cache local si Supabase est vide)
@@ -715,7 +856,8 @@ export default function App() {
                 reste_a_payer: Number(v.reste_a_payer) || 0,
                 status: v.status || 'active',
                 is_deleted: Boolean(v.is_deleted),
-                vendu_par_id: v.vendu_par_id || currentPatron.id,
+                vendu_par_id: v.vendu_par_id || v.employee_id || currentPatron.id,
+                employee_id: v.employee_id ?? null,
                 vendu_par_nom: v.vendu_par_nom || currentPatron.nom,
                 vendu_par_genre: v.vendu_par_genre || 'femme',
                 date: v.date || v.created_at || new Date().toISOString(),
@@ -827,7 +969,14 @@ export default function App() {
         // Filtrage STRICT par boutique courante (currentBoutiqueId) pour éviter tout mélange entre boutiques
         const [empList, prodList, ventList, depList, credList, parrList] = await Promise.all([
           db.employes.filter((e) => (e.boutique_id ? e.boutique_id === currentBoutiqueId : e.patron_id === currentBoutiqueId)).toArray(),
-          db.produits.filter((p) => (p.boutique_id ? p.boutique_id === currentBoutiqueId : p.patron_id === currentBoutiqueId)).toArray(),
+          db.produits
+            .filter(
+              (p) =>
+                p.status !== 'deleted' &&
+                p.is_deleted !== true &&
+                (p.boutique_id ? p.boutique_id === currentBoutiqueId : p.patron_id === currentBoutiqueId)
+            )
+            .toArray(),
           db.ventes.filter((v) => (v.boutique_id ? v.boutique_id === currentBoutiqueId : v.patron_id === currentBoutiqueId)).toArray(),
           db.depenses.filter((d) => (d.boutique_id ? d.boutique_id === currentBoutiqueId : d.patron_id === currentBoutiqueId)).toArray(),
           db.credits.filter((c) => (c.boutique_id ? c.boutique_id === currentBoutiqueId : c.patron_id === currentBoutiqueId)).toArray(),
@@ -876,6 +1025,33 @@ export default function App() {
               role: 'patron',
               genre: currentPatron.genre || 'femme',
               photo_url: currentPatron.photo_url,
+            });
+          }
+        } else if (currentUser.role === 'patron') {
+          // Garder nom, photo et genre patron à jour après rechargement Supabase
+          const patronGenre = currentPatron.genre || 'femme';
+          if (
+            currentUser.nom !== currentPatron.nom ||
+            currentUser.photo_url !== currentPatron.photo_url ||
+            currentUser.genre !== patronGenre
+          ) {
+            setCurrentUser({
+              ...currentUser,
+              nom: currentPatron.nom,
+              photo_url: currentPatron.photo_url,
+              genre: patronGenre,
+            });
+          }
+        } else {
+          const refreshedEmp = empList.find((e) => e.id === currentUser.id);
+          if (
+            refreshedEmp &&
+            (currentUser.nom !== refreshedEmp.nom || currentUser.photo_url !== refreshedEmp.photo_url)
+          ) {
+            setCurrentUser({
+              ...currentUser,
+              nom: refreshedEmp.nom,
+              photo_url: refreshedEmp.photo_url,
             });
           }
         }
@@ -1134,7 +1310,7 @@ export default function App() {
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const saleId = generatePrefixedId('vte');
         const nowIso = new Date().toISOString();
-        const saleRecord: Vente = { id: saleId, patron_id: mainPatronId, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: isOnlineNow };
+        const saleRecord: Vente = { id: saleId, patron_id: mainPatronId, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, employee_id: currentUser.role === 'patron' ? null : currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: isOnlineNow };
 
         const currentProd = products.find((p) => p.id === saleData.produit_id);
         const newStock = Math.max(0, (currentProd?.stock_qte ?? 0) - saleData.qte);
@@ -1188,8 +1364,7 @@ export default function App() {
           await db.produits.update(currentProd.id, { stock_qte: newStock });
         }
         if (saleData.est_credit && (Number(saleData.reste_a_payer) || 0) > 0) {
-          // RÈGLE : ID unique neuf avec crypto.randomUUID()
-          const creditId = generatePrefixedId('crd');
+          const creditId = saleId;
           const resteVal = Number(saleData.reste_a_payer) || 0;
           const totalVal = Number(saleData.montant_total) || resteVal;
           const payeVal = Math.max(0, totalVal - resteVal);
@@ -1205,6 +1380,7 @@ export default function App() {
           });
           const creditRecord: Credit = {
             id: creditId,
+            sale_id: saleId,
             patron_id: mainPatronId,
             boutique_id: activeBoutiqueId,
             client_nom: saleData.client_nom || 'Client crédit',
@@ -1306,21 +1482,11 @@ export default function App() {
       } else if (action.type === 'produit') {
         const prodData = action.data;
         const prodId = 'prod-vocal-' + Date.now();
-        const prodRecord: Produit = { id: prodId, patron_id: patron.id, boutique_id: activeBoutiqueId, nom: prodData.nom, photo_url: 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=400&q=80', prix_achat: prodData.prix_achat, prix_vente: prodData.prix_vente, stock_qte: prodData.stock_qte, seuil_alerte: 5, created_at: new Date().toISOString() };
+        const prodRecord: Produit = { id: prodId, patron_id: mainPatronId || patron.id, boutique_id: activeBoutiqueId, nom: prodData.nom, photo_url: 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=400&q=80', prix_achat: prodData.prix_achat, prix_vente: prodData.prix_vente, stock_qte: prodData.stock_qte, seuil_alerte: 5, created_at: new Date().toISOString() };
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            await supabase.from('produits').insert([{
-              id: prodId,
-              patron_id: patron.id,
-              boutique_id: activeBoutiqueId,
-              nom: prodRecord.nom,
-              prix_achat: prodRecord.prix_achat,
-              prix_vente: prodRecord.prix_vente,
-              stock_qte: prodRecord.stock_qte,
-              seuil_alerte: 5,
-              photo_url: prodRecord.photo_url,
-              created_at: prodRecord.created_at,
-            }]);
+            const { resolvedPatronId } = await upsertProduitSafely(prodRecord, patron);
+            prodRecord.patron_id = resolvedPatronId || patron.id;
           } catch {
             // ignore
           }
@@ -1365,7 +1531,7 @@ export default function App() {
               nom: newPatron.nom,
               role: 'patron',
               genre: newPatron.genre || 'femme',
-              photo_url: newPatron.photo_url,
+              photo_url: newPatron.photo_url || newPatron.photo_profil,
             };
             setCurrentUser(user);
             localStorage.setItem('efa_active_user_id', user.id);
@@ -1515,7 +1681,29 @@ export default function App() {
             currentUser={currentUser}
             employes={employes}
             onLogout={handleLogout}
-            onPatronUpdated={(updated) => { setPatron(updated); syncEmployeesSubscription(updated.id, updated.subscription_status || 'trial').catch(console.error); }}
+            onPatronUpdated={(updated) => {
+              setPatron(updated);
+              if (updated.nom_boutique) {
+                localStorage.setItem('currentBoutiqueName', updated.nom_boutique);
+                if (localStorage.getItem('deviceStoreId')) {
+                  localStorage.setItem('deviceStoreName', updated.nom_boutique);
+                  setDeviceStoreInfo(getDeviceStoreInfo());
+                }
+              }
+              if (currentUser?.role === 'patron') {
+                setCurrentUser((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        nom: updated.nom,
+                        photo_url: updated.photo_url,
+                        genre: updated.genre || prev.genre,
+                      }
+                    : prev
+                );
+              }
+              syncEmployeesSubscription(updated.id, updated.subscription_status || 'trial').catch(console.error);
+            }}
             onOpenSubscriptionModal={handleOpenSubscriptionModal}
             onDataRefresh={loadDatabase}
             onNavigate={handleNavigate}

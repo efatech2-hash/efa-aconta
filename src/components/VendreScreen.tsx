@@ -311,11 +311,25 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
     }
 
     try {
+      let firstVenteId = '';
+      let remainingCreditToAssign = parsedReste;
+
       // 1. Sauvegarder chaque ligne de vente et décrémenter les stocks directement dans Supabase & local
-      for (const item of cart) {
+      for (let idx = 0; idx < cart.length; idx++) {
+        const item = cart[idx];
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const venteId = generatePrefixedId('vte');
+        if (!firstVenteId) firstVenteId = venteId;
         const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
+
+        const itemReste = creditMode
+          ? (cart.length === 1
+              ? parsedReste
+              : Math.min(item.sous_total, Math.max(0, remainingCreditToAssign)))
+          : 0;
+        if (creditMode) {
+          remainingCreditToAssign = Math.max(0, remainingCreditToAssign - itemReste);
+        }
 
         const saleRecord = {
           id: venteId,
@@ -328,10 +342,11 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           montant_total: item.sous_total,
           client_nom: clientNom.trim() || (creditMode ? 'Sans nom' : 'Client Comptant'),
           est_credit: creditMode,
-          reste_a_payer: creditMode ? item.sous_total : 0,
+          reste_a_payer: itemReste,
           status: 'active' as const,
           is_deleted: false,
           vendu_par_id: currentUser.id,
+          employee_id: currentUser.role === 'patron' ? null : currentUser.id,
           vendu_par_nom: currentUser.nom,
           vendu_par_genre: currentUser.genre,
           date: nowIso,
@@ -356,10 +371,11 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           montant_total: item.sous_total,
           client_nom: saleRecord.client_nom,
           est_credit: creditMode,
-          reste_a_payer: saleRecord.reste_a_payer,
+          reste_a_payer: itemReste,
           status: 'active',
           is_deleted: false,
           vendu_par_id: currentUser.id,
+          employee_id: currentUser.role === 'patron' ? null : currentUser.id,
           vendu_par_nom: currentUser.nom,
           vendu_par_genre: currentUser.genre,
           date: nowIso,
@@ -379,6 +395,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           montant_total: item.sous_total,
           client_nom: saleRecord.client_nom,
           est_credit: creditMode,
+          reste_a_payer: itemReste,
           type: 'vente',
           status: 'active',
           is_deleted: false,
@@ -395,13 +412,24 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
               .eq('id', item.produit_id);
 
             // UPSERT table transactions (onConflict: 'id')
-            const resTx: any = await supabase
+            let resTx: any = await supabase
               .from('transactions')
               .upsert(rowTransaction, { onConflict: 'id' });
 
+            if (resTx?.error && (resTx.error.code === 'PGRST204' || resTx.error.code === '42703' || String(resTx.error.message || '').includes('reste_a_payer'))) {
+              const fallbackTx: any = { ...rowTransaction };
+              delete fallbackTx.reste_a_payer;
+              resTx = await supabase.from('transactions').upsert(fallbackTx, { onConflict: 'id' });
+            }
+
             // Synchronisation miroir ventes
             try {
-              await supabase.from('ventes').upsert(rowVente, { onConflict: 'id' });
+              const resV = await supabase.from('ventes').upsert(rowVente, { onConflict: 'id' });
+              if (resV?.error && (resV.error.code === 'PGRST204' || resV.error.code === '42703')) {
+                const fallbackVente: any = { ...rowVente };
+                delete fallbackVente.employee_id;
+                await supabase.from('ventes').upsert(fallbackVente, { onConflict: 'id' });
+              }
             } catch {}
 
             const isTxSuccess = !resTx?.error || resTx?.status === 409 || resTx?.error?.code === '23505';
@@ -431,10 +459,9 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         await db.produits.update(item.produit_id, { stock_qte: newStock });
       }
 
-      // 2. Si crédit / reste à payer > 0, enregistrer dans la table credits avec boutique_id active et patron_id principal
+      // 2. Si crédit / reste à payer > 0, enregistrer dans la table credits avec id = id de cette vente (ou ticketId si multi-articles)
       if (creditMode && parsedReste > 0) {
-        // RÈGLE : ID unique neuf avec crypto.randomUUID()
-        const creditId = generatePrefixedId('crd');
+        const creditId = (cart.length === 1 && firstVenteId) ? firstVenteId : ticketId;
         const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
         const montantPayeInitial = Math.max(0, totalGeneral - parsedReste);
 
@@ -451,7 +478,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
 
         const creditRecord: Credit = {
           id: creditId,
-          sale_id: ticketId,
+          sale_id: cart.length === 1 ? firstVenteId : ticketId,
           patron_id: mainPatronId,
           boutique_id: activeBoutiqueId,
           client_nom: clientNom.trim() || 'Sans nom',

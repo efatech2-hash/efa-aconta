@@ -123,14 +123,12 @@ async function runAllTests() {
   const resBoutique4 = await createSubBoutique({ mainPatron, nom: 'Boutique 4 - Illégale' });
   assert(!resBoutique4.success, 'Tentative de 4e boutique bloquée (limite 3 boutiques Pro)');
 
-  // Répartition de 300 articles cumulés sur les 3 boutiques :
-  // - 100 sur MAIN
-  // - 100 sur Boutique 2
-  // - 100 sur Boutique 3
-  console.log('  -> Insertion de 100 articles sur la boutique Principale...');
-  const prodsMain: Produit[] = Array.from({ length: 100 }).map((_, i) => ({
+  // Règle d'or articles : 300 articles actifs max par boutique active (sans compter supprimés ni autres boutiques)
+  console.log('  -> Insertion de 300 articles actifs sur la boutique Principale...');
+  const prodsMain: Produit[] = Array.from({ length: 300 }).map((_, i) => ({
     id: `prod_main_${i}`,
     patron_id: mainPatron.id,
+    boutique_id: mainPatron.id,
     nom: `Robe Pagne Lomé #${i + 1}`,
     photo_url: '',
     categorie: 'Vêtements',
@@ -142,10 +140,11 @@ async function runAllTests() {
   }));
   await db.produits.bulkPut(prodsMain);
 
-  console.log('  -> Insertion de 100 articles sur Boutique 2...');
+  console.log('  -> Insertion de 100 articles actifs sur Boutique 2 (indépendants)...');
   const prodsB2: Produit[] = Array.from({ length: 100 }).map((_, i) => ({
     id: `prod_b2_${i}`,
     patron_id: boutique2.id,
+    boutique_id: boutique2.id,
     nom: `Chaussures Cuir Tokoin #${i + 1}`,
     photo_url: '',
     categorie: 'Chaussures',
@@ -157,42 +156,13 @@ async function runAllTests() {
   }));
   await db.produits.bulkPut(prodsB2);
 
-  console.log('  -> Insertion de 100 articles sur Boutique 3...');
-  const prodsB3: Produit[] = Array.from({ length: 100 }).map((_, i) => ({
-    id: `prod_b3_${i}`,
-    patron_id: boutique3.id,
-    nom: `Sac à main Artisanal #${i + 1}`,
-    photo_url: '',
-    categorie: 'Accessoires',
-    prix_vente: 8000,
-    prix_achat: 5000,
-    stock_qte: 8,
-    seuil_alerte: 2,
-    created_at: now,
-  }));
-  await db.produits.bulkPut(prodsB3);
-
-  // Vérification total cumulé
-  const totalArticles = await getTotalArticleCount(mainPatron.id);
-  assert(totalArticles === 300, `Total articles calculé sur toutes les boutiques = 300 (trouvé: ${totalArticles})`);
-
-  // Test blocage 301e article sur MAIN
+  // Vérification blocage 301e article sur MAIN (qui a déjà 300 articles actifs)
   const checkAddMain = await canAddArticlePro(mainPatron.id);
   assert(!checkAddMain.allowed, 'Ajout du 301e article sur la boutique principale BLOQUÉ');
-  assert(
-    checkAddMain.message ===
-      'Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.',
-    `Message officiel sur MAIN respecté : "${checkAddMain.message}"`
-  );
 
-  // Test blocage 301e article sur SUB (Boutique 2)
+  // Vérification que Boutique 2 (100 articles actifs) peut toujours ajouter un article
   const checkAddSub = await canAddArticlePro(boutique2.id);
-  assert(!checkAddSub.allowed, 'Ajout du 301e article sur Boutique 2 (SUB) BLOQUÉ');
-  assert(
-    checkAddSub.message ===
-      'Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.',
-    `Message officiel sur SUB respecté : "${checkAddSub.message}"`
-  );
+  assert(checkAddSub.allowed && checkAddSub.currentTotal === 100, 'Boutique 2 (100/300) reste autorisée indépendamment de MAIN');
 
   // =========================================================================
   // TEST 2 : 10 EMPLOYÉS RÉPARTIS SUR 3 BOUTIQUES & BLOCAGE AU 11E

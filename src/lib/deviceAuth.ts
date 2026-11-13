@@ -3,6 +3,8 @@ import { db } from './db';
 import { hashPin, verifyPin } from './security';
 import type { Patron } from './types';
 import { generateReferralCode } from './ambassadeur';
+import { safeSupabaseWrite } from './supabaseHelper';
+import { uploadProfilePhoto } from './productStorage';
 
 export interface EfaBoutiqueRecord {
   id: string;
@@ -13,6 +15,11 @@ export interface EfaBoutiqueRecord {
   pin_code?: string;
   telephone?: string;
   whatsapp_number?: string;
+  phone_country?: string;
+  phone_number?: string;
+  photo_url?: string;
+  photo_profil?: string;
+  patron_photo_url?: string;
   genre?: 'femme' | 'homme';
   plan: 'essai' | 'populaire' | 'pro';
   date_fin_essai: string;
@@ -135,10 +142,24 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
   const amt = Number((b as any).last_payment_amount) || 0;
 
   const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
-  const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
-  const isPro = (isPlanNotTrial && isStatusActive) || rawPlan === 'pro' || rawPlan.includes('pro') || amt >= 50000 || (b as any).isProActive === true;
-  const isPopulaire = !isPro && (rawPlan === 'populaire' || rawPlan.includes('populaire'));
-  const effectiveStatus = isPro ? 'pro' : (isPopulaire ? 'populaire' : (rawPlan === 'essai' ? 'trial' : (rawPlan || 'trial')));
+  const isPopulaire =
+    rawPlan === 'populaire' ||
+    rawPlan.includes('populaire') ||
+    rawPlan.includes('16500') ||
+    rawPlan.includes('prolonge');
+  const isPro =
+    !isPopulaire &&
+    (rawPlan === 'pro' ||
+      (rawPlan.includes('pro') && !rawPlan.includes('prolonge')) ||
+      amt >= 50000 ||
+      (b as any).isProActive === true);
+  const effectiveStatus = isPro
+    ? 'pro'
+    : isPopulaire
+    ? 'populaire'
+    : rawPlan === 'essai'
+    ? 'trial'
+    : rawPlan || 'trial';
 
   const rawPatronId = (b as any).patron_id;
   const isSub = Boolean(
@@ -154,14 +175,13 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
   return {
     id: b.id,
     nom: (b as any).proprietaire || b.nom_patron || b.nom_affichage || (b as any).nom || 'Patron',
-    telephone: (b as any).telephone || '',
-    phone_country: '+228',
-    phone_number: (b as any).telephone || '',
-    phone_full: (b as any).telephone || '',
+    telephone: (b as any).telephone || (b as any).whatsapp_number || '',
+    phone_country: (b as any).phone_country || '+228',
+    phone_number: (b as any).phone_number || (b as any).telephone || '',
+    phone_full: (b as any).phone_full || (b as any).whatsapp_number || (b as any).telephone || '',
     nom_boutique: b.nom_boutique || b.nom_affichage || (b as any).nom || 'Ma Boutique',
-    photo_url: (b as any).photo_url || (b as any).photo_profil || undefined,
-    photo_devanture: (b as any).photo_devanture || (b as any).devanture_url || undefined,
-    adresse: (b as any).adresse || (b as any).adresse_boutique || undefined,
+    photo_url: (b as any).patron_photo_url || undefined,
+    photo_profil: (b as any).patron_photo_url || undefined,
     pin_code: pin,
     code_pin: pin,
     pin_hash: b.pin_patron_hash || (b as any).pin_hash,
@@ -175,20 +195,22 @@ export function boutiqueToPatron(b: EfaBoutiqueRecord | any, pinClear?: string):
     subscription_status: effectiveStatus,
     current_plan: isPro ? 'pro' : effectiveStatus,
     isProActive: isPro,
-    trial_start_date: b.created_at,
+    trial_start_date: (b as any).date_inscription || b.created_at,
     trial_end_date: finAbonnement,
     subscription_end_date: finAbonnement,
     fin_abonnement: finAbonnement,
     forfait: isPro ? 'pro' : (b as any).forfait || b.plan,
     statut: isStatusActive ? 'ACTIF' : (b as any).statut,
-    referral_code: b.referral_code || (b as any).code_parrain || undefined,
-    referred_by: b.referred_by || null,
+    referral_code: (b as any).code_parrainage || b.referral_code || (b as any).code_parrain || undefined,
+    code_parrainage: (b as any).code_parrainage || b.referral_code || (b as any).code_parrain || undefined,
+    referred_by: b.referred_by || (b as any).referred_by_code || null,
     referral_bonus_given: (b as any).referral_bonus_given || false,
     has_paid_annuel: (b as any).has_paid_annuel || false,
     referrals_count: (b as any).referrals_count || 0,
     bonus_days_earned: (b as any).bonus_days_earned || 0,
     solde: Number((b as any).solde) || 0,
     auto_logout_after_action: true,
+    date_inscription: (b as any).date_inscription || (!isSub ? b.created_at : undefined),
     created_at: b.created_at,
   };
 }
@@ -203,6 +225,9 @@ export async function createBoutique({
   genre,
   whatsappNumber,
   telephone,
+  phoneCountry,
+  phoneNumber,
+  photoUrl,
   email,
 }: {
   nomBoutique: string;
@@ -211,6 +236,9 @@ export async function createBoutique({
   genre?: 'femme' | 'homme';
   whatsappNumber?: string;
   telephone?: string;
+  phoneCountry?: string;
+  phoneNumber?: string;
+  photoUrl?: string;
   email?: string;
 }): Promise<{ success: boolean; boutique?: EfaBoutiqueRecord; error?: string }> {
   try {
@@ -221,9 +249,11 @@ export async function createBoutique({
     const boutiqueId = 'btq_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
     const finalGenre = genre === 'homme' ? 'homme' : 'femme';
 
-    // Validation du numéro WhatsApp / téléphone
+    // Validation du numéro WhatsApp / téléphone (indicatif + numéro)
+    const finalPhoneCountry = (phoneCountry || '+228').trim();
     const finalWhatsapp = (whatsappNumber || telephone || '').trim();
     const finalTelephone = (telephone || whatsappNumber || '').trim();
+    const finalPhoneNumber = (phoneNumber || finalTelephone.replace(finalPhoneCountry, '')).replace(/\D/g, '');
 
     // Capture du parrain depuis l'URL (?ref=CODE) ou hash
     let refBy: string | null = null;
@@ -260,6 +290,8 @@ export async function createBoutique({
       genre: finalGenre,
       telephone: finalTelephone,
       whatsapp_number: finalWhatsapp,
+      phone_country: finalPhoneCountry,
+      phone_number: finalPhoneNumber,
       plan: 'essai',
       date_fin_essai: trialEnd.toISOString(),
       referral_code: referralCode,
@@ -305,6 +337,7 @@ export async function createBoutique({
       genre: finalGenre,
       pin_code: pin,
       referral_code: referralCode,
+      code_parrainage: referralCode,
       referred_by_code: cleanReferredBy,
       referred_by: cleanReferredBy,
       plan: 'essai',
@@ -318,17 +351,8 @@ export async function createBoutique({
       updated_at: nowIso,
     };
 
-    // INSERT OBLIGATOIRE dans Supabase.
-    let { error: insertErr } = await supabase
-      .from('boutiques')
-      .insert(centralBoutiqueData);
-
-    if (insertErr && (insertErr.message?.includes('genre') || insertErr.code === 'PGRST204')) {
-      const fallbackData = { ...centralBoutiqueData };
-      delete fallbackData.genre;
-      const retry = await supabase.from('boutiques').insert(fallbackData);
-      insertErr = retry.error;
-    }
+    // INSERT OBLIGATOIRE dans Supabase table boutiques (avec fallback colonnes optionnelles)
+    const { error: insertErr } = await safeSupabaseWrite('boutiques', 'upsert', centralBoutiqueData);
 
     if (insertErr) {
       console.error('[DeviceAuth CREATE] ERREUR INSERT BOUTIQUES OBLIGATOIRE:', insertErr);
@@ -339,6 +363,95 @@ export async function createBoutique({
     }
 
     console.log('[DeviceAuth CREATE] SUCCÈS INSERT OBLIGATOIRE BOUTIQUES:', boutiqueId);
+
+    // 1b. Upload photo patron (méthode identique employé : bucket efa-photos + UPDATE patrons SET photo_profil + relecture)
+    let uploadedPatronPhoto: string | undefined = undefined;
+    if (photoUrl && photoUrl.trim()) {
+      try {
+        const rawPhoto = photoUrl.trim();
+        uploadedPatronPhoto =
+          rawPhoto.startsWith('data:') || rawPhoto.startsWith('blob:')
+            ? await uploadProfilePhoto(rawPhoto, boutiqueId, 'patron')
+            : rawPhoto;
+      } catch (photoErr) {
+        console.warn('[DeviceAuth CREATE] Note upload photo patron:', photoErr);
+        uploadedPatronPhoto = photoUrl.trim();
+      }
+    }
+
+    // 1c. Upsert propre de la ligne dans la table "patrons" avec genre, indicatif+numéro, photo_profil, code_parrainage + referred_by
+    const cleanPatronRow: Record<string, any> = {
+      id: boutiqueId,
+      nom: nomPatron.trim() || 'Patron',
+      telephone: finalTelephone,
+      phone_country: finalPhoneCountry,
+      phone_number: finalPhoneNumber,
+      phone_full: finalWhatsapp,
+      nom_boutique: nomBoutique.trim(),
+      pin_hash: pinHash,
+      pin_code: pin,
+      code_pin: pin,
+      photo_profil: uploadedPatronPhoto || null,
+      photo_url: uploadedPatronPhoto || null,
+      genre: finalGenre,
+      role: 'patron',
+      code_parrainage: referralCode,
+      referral_code: referralCode,
+      referred_by: cleanReferredBy,
+      abonnement_expire: trialEndIso,
+      subscription_status: 'trial',
+      trial_start_date: nowIso,
+      trial_end_date: trialEndIso,
+      subscription_end_date: trialEndIso,
+      date_inscription: nowIso,
+      created_at: nowIso,
+    };
+
+    try {
+      const { error: pUpsertErr } = await safeSupabaseWrite('patrons', 'upsert', cleanPatronRow);
+      if (pUpsertErr) {
+        console.warn('[DeviceAuth CREATE] Note upsert patrons:', pUpsertErr.message || pUpsertErr);
+      }
+
+      if (uploadedPatronPhoto) {
+        await safeSupabaseWrite(
+          'patrons',
+          'update',
+          {
+            photo_profil: uploadedPatronPhoto,
+            photo_url: uploadedPatronPhoto,
+          },
+          { column: 'id', value: boutiqueId }
+        );
+
+        try {
+          const { data: rereadPat } = await supabase
+            .from('patrons')
+            .select('photo_profil, photo_url, genre')
+            .eq('id', boutiqueId)
+            .maybeSingle();
+          if (rereadPat) {
+            uploadedPatronPhoto = rereadPat.photo_profil || rereadPat.photo_url || uploadedPatronPhoto;
+          }
+        } catch {}
+      }
+    } catch (pEx) {
+      console.warn('[DeviceAuth CREATE] Exception upsert patrons:', pEx);
+    }
+
+    if (uploadedPatronPhoto) {
+      boutiqueRecord.patron_photo_url = uploadedPatronPhoto;
+      boutiqueRecord.photo_profil = uploadedPatronPhoto;
+      boutiqueRecord.photo_url = uploadedPatronPhoto;
+    }
+
+    const patronObj = boutiqueToPatron(boutiqueRecord, pin);
+    patronObj.photo_url = uploadedPatronPhoto;
+    patronObj.photo_profil = uploadedPatronPhoto;
+    patronObj.genre = finalGenre;
+    patronObj.code_parrainage = referralCode;
+    patronObj.referral_code = referralCode;
+    patronObj.referred_by = cleanReferredBy;
 
     // 2. Enregistrement table "profiles" (même id, même referral_code, même subscription_end_date, même whatsapp_number)
     try {
@@ -351,91 +464,120 @@ export async function createBoutique({
         whatsapp_number: finalWhatsapp,
         referral_code: referralCode,
         referred_by_code: cleanReferredBy,
-        subscription_end_date: trialEnd.toISOString(),
-        created_at: now.toISOString(),
+        subscription_end_date: trialEndIso,
+        created_at: nowIso,
       };
-      let { error: profileErr } = await supabase
-        .from('profiles')
-        .upsert(profileData, { onConflict: 'id' });
-
-      if (profileErr && (profileErr.message?.includes('schema cache') || profileErr.code === 'PGRST204')) {
-        const fallbackProfile = { ...profileData };
-        if (profileErr.message?.includes('whatsapp_number')) delete fallbackProfile.whatsapp_number;
-        const retryProfile = await supabase.from('profiles').upsert(fallbackProfile, { onConflict: 'id' });
-        profileErr = retryProfile.error;
-      }
-
+      const { error: profileErr } = await safeSupabaseWrite('profiles', 'upsert', profileData);
       if (profileErr) {
         console.error('[DeviceAuth CREATE] ERREUR INSERT PROFILES:', profileErr);
-      } else {
-        console.log('[DeviceAuth CREATE] SUCCÈS INSERT PROFILES:', boutiqueId);
       }
     } catch (profileErr) {
       console.error('[DeviceAuth CREATE] EXCEPTION PROFILES:', profileErr);
     }
 
-    // 3. Suivi parrainage : création de l'entrée dans la table centrale "referrals" avec status=pending
+    // 3. Suivi parrainage : 1 SEULE ligne dans "parrainage" (+ "referrals") à l'inscription du filleul
     if (cleanReferredBy) {
       try {
-        let parrainId = cleanReferredBy;
+        let parrainId: string | null = null;
         let parrainNom = 'Parrain EFA';
-        const { data: parrainBtq } = await supabase
-          .from('boutiques')
-          .select('id, proprietaire, nom_boutique')
-          .eq('referral_code', cleanReferredBy)
-          .maybeSingle();
 
-        if (parrainBtq) {
-          parrainId = parrainBtq.id;
-          parrainNom = parrainBtq.proprietaire || parrainBtq.nom_boutique || 'Parrain EFA';
-        } else {
-          const { data: parrainPatron } = await supabase
+        // Chercher d'abord dans patrons (code_parrainage / referral_code)
+        try {
+          const { data: pByCode } = await supabase
             .from('patrons')
             .select('id, nom, nom_boutique')
-            .eq('referral_code', cleanReferredBy)
+            .eq('code_parrainage', cleanReferredBy)
             .maybeSingle();
-          if (parrainPatron) {
-            parrainId = parrainPatron.id;
-            parrainNom = parrainPatron.nom || parrainPatron.nom_boutique || 'Parrain EFA';
+          if (pByCode) {
+            parrainId = pByCode.id;
+            parrainNom = pByCode.nom || pByCode.nom_boutique || 'Parrain EFA';
           }
+        } catch {}
+
+        if (!parrainId) {
+          try {
+            const { data: pByRef } = await supabase
+              .from('patrons')
+              .select('id, nom, nom_boutique')
+              .eq('referral_code', cleanReferredBy)
+              .maybeSingle();
+            if (pByRef) {
+              parrainId = pByRef.id;
+              parrainNom = pByRef.nom || pByRef.nom_boutique || 'Parrain EFA';
+            }
+          } catch {}
         }
 
-        const referralEntry = {
-          id: 'ref_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
-          parrain_id: parrainId,
-          filleul_id: boutiqueId,
-          status: 'pending',
-          reward_given: false,
-          parrain_code: cleanReferredBy,
-          filleul_code: referralCode,
-          parrain_nom: parrainNom,
-          filleul_nom: nomBoutique.trim(),
-          filleul_plan: 'essai',
-          created_at: now.toISOString(),
-        };
+        if (!parrainId) {
+          try {
+            const { data: parrainBtq } = await supabase
+              .from('boutiques')
+              .select('id, proprietaire, nom_boutique, patron_id')
+              .or(`referral_code.eq.${cleanReferredBy},code_parrainage.eq.${cleanReferredBy}`)
+              .limit(1)
+              .maybeSingle();
+            if (parrainBtq) {
+              parrainId = parrainBtq.patron_id || parrainBtq.id;
+              parrainNom = parrainBtq.proprietaire || parrainBtq.nom_boutique || 'Parrain EFA';
+            }
+          } catch {}
+        }
 
-        await supabase.from('referrals').insert(referralEntry);
+        const resolvedParrainId = parrainId || cleanReferredBy;
+        const singleRefId = 'parr_' + boutiqueId;
 
-        // SYNC TABLE parrainage
-        try {
-          await supabase.from('parrainage').insert({
-            id: referralEntry.id,
-            parrain_id: parrainId,
-            filleul_id: boutiqueId,
-            filleul_nom: nomBoutique.trim(),
-            lien_code: cleanReferredBy,
-            filleul_phone: '',
-            status: 'attente',
-            mois_gagnes: 0,
-            date_inscription: now.toISOString(),
-          });
-        } catch {}
+        if (resolvedParrainId !== boutiqueId) {
+          try {
+            const referralEntry = {
+              id: singleRefId,
+              parrain_id: resolvedParrainId,
+              filleul_id: boutiqueId,
+              status: 'pending',
+              reward_given: false,
+              parrain_code: cleanReferredBy,
+              filleul_code: referralCode,
+              parrain_nom: parrainNom,
+              filleul_nom: nomBoutique.trim(),
+              filleul_plan: 'essai',
+              created_at: nowIso,
+            };
+            await safeSupabaseWrite('referrals', 'upsert', referralEntry);
+          } catch {}
+
+          // INSERT UNIQUE (1 seule ligne par patron filleul principal) dans table `parrainage`
+          const { data: existingSignupParr } = await supabase
+            .from('parrainage')
+            .select('id')
+            .eq('filleul_id', boutiqueId)
+            .limit(1)
+            .maybeSingle();
+
+          if (!existingSignupParr) {
+            const parrainageRow = {
+              id: singleRefId,
+              parrain_id: resolvedParrainId,
+              filleul_id: boutiqueId,
+              boutique_id: boutiqueId,
+              lien_code: cleanReferredBy,
+              filleul_nom: nomBoutique.trim(),
+              filleul_phone: finalTelephone,
+              status: 'attente',
+              mois_gagnes: 0,
+              date_inscription: nowIso,
+            };
+
+            const { error: parrErr } = await safeSupabaseWrite('parrainage', 'upsert', parrainageRow);
+            if (parrErr) {
+              console.warn('[DeviceAuth CREATE] Note insert parrainage:', parrErr.message || parrErr);
+            }
+          }
+        }
       } catch (refErr) {
-        console.warn('[DeviceAuth] Erreur insert referrals pending:', refErr);
+        console.warn('[DeviceAuth] Erreur insert parrainage inscription:', refErr);
       }
     }
 
-    // 2. Miroirs de secours efa_devices et patrons dans Supabase
+    // 4. Appareil local & Dexie
     try {
       const currentDevId = getDeviceId();
       const currentDevName = getDeviceName();
@@ -444,23 +586,20 @@ export async function createBoutique({
         boutique_id: boutiqueId,
         device_id: currentDevId,
         device_name: currentDevName,
-        last_seen: now.toISOString(),
+        last_seen: nowIso,
         is_active: true,
-        created_at: now.toISOString(),
+        created_at: nowIso,
       };
       await supabase.from('efa_devices').upsert(deviceRecord);
-      const patronObj = boutiqueToPatron(boutiqueRecord, pin);
-      await supabase.from('patrons').upsert(patronObj);
 
-      // Sauvegarde appareil local Dexie pour mode offline
       await db.appareils.put({
         id: deviceRecord.id,
         patron_id: boutiqueId,
         device_id: currentDevId,
         device_name: currentDevName,
-        last_active: now.toISOString(),
+        last_active: nowIso,
         is_active: true,
-        created_at: now.toISOString(),
+        created_at: nowIso,
       });
       await db.patrons.put(patronObj);
     } catch (cloudErr) {
@@ -518,25 +657,50 @@ export async function loginBoutique({
         .maybeSingle();
 
       if (centralBtq) {
+        let remotePatMeta: any = null;
+        try {
+          const { data: rp } = await supabase
+            .from('patrons')
+            .select('nom, genre, photo_profil, photo_url, date_inscription, phone_country, phone_number, phone_full')
+            .eq('id', (centralBtq as any).patron_id || centralBtq.id)
+            .maybeSingle();
+          remotePatMeta = rp;
+        } catch {}
+
         const rawPlan = ((centralBtq as any).plan || (centralBtq as any).forfait || '').toLowerCase().trim();
         const rawStatus = ((centralBtq as any).status || (centralBtq as any).statut || '').toLowerCase().trim();
         const subEndDate = (centralBtq as any).subscription_end_date || (centralBtq as any).subscription_end || (centralBtq as any).fin_abonnement || centralBtq.date_fin_essai;
 
-        // RÈGLE : Le vrai PRO est dans boutiques : plan (pro, pro_annuel, populaire) + status = active + subscription_end_date.
-        // si plan != trial et status = active, affiche PRO.
         const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
-        const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
-        const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number((centralBtq as any).last_payment_amount) >= 50000;
+        const isPopulaire =
+          rawPlan === 'populaire' ||
+          rawPlan.includes('populaire') ||
+          rawPlan.includes('16500') ||
+          rawPlan.includes('prolonge');
+        const isPro =
+          !isPopulaire &&
+          (rawPlan === 'pro' ||
+            (rawPlan.includes('pro') && !rawPlan.includes('prolonge')) ||
+            Number((centralBtq as any).last_payment_amount) >= 50000);
+        const resolvedGenre: 'homme' | 'femme' =
+          remotePatMeta?.genre === 'homme' || (centralBtq as any).genre === 'homme' ? 'homme' : 'femme';
 
         boutique = {
           id: centralBtq.id,
           nom_boutique: slugifyBoutiqueName(centralBtq.nom_boutique),
           nom_affichage: centralBtq.nom_boutique,
-          nom_patron: centralBtq.proprietaire || centralBtq.nom || 'Patron',
+          nom_patron: remotePatMeta?.nom || centralBtq.proprietaire || centralBtq.nom || 'Patron',
           pin_patron_hash: centralBtq.pin_code ? await hashPin(centralBtq.pin_code) : '',
           pin_code: centralBtq.pin_code || '',
-          plan: isPro ? 'pro' : (centralBtq.plan || 'essai'),
+          genre: resolvedGenre,
+          patron_photo_url: remotePatMeta?.photo_profil || remotePatMeta?.photo_url || undefined,
+          telephone: (centralBtq as any).telephone || (centralBtq as any).whatsapp_number || '',
+          whatsapp_number: (centralBtq as any).whatsapp_number || (centralBtq as any).telephone || '',
+          phone_country: remotePatMeta?.phone_country || '+228',
+          phone_number: remotePatMeta?.phone_number || '',
+          plan: isPro ? 'pro' : isPopulaire ? 'populaire' : 'essai',
           date_fin_essai: subEndDate || new Date(Date.now() + 365 * 86400000).toISOString(),
+          date_inscription: remotePatMeta?.date_inscription || centralBtq.created_at,
           created_at: centralBtq.created_at || new Date().toISOString(),
           status: isStatusActive ? 'active' : (centralBtq.status || 'active'),
           subscription_end: subEndDate,
@@ -548,7 +712,7 @@ export async function loginBoutique({
       console.warn('[DeviceAuth] Erreur recherche Supabase boutiques:', e);
     }
 
-    // 2. Fallback recherche dans table patrons Supabase (infos patron seulement, JAMAIS subscription_status !)
+    // 2. Fallback recherche dans table patrons Supabase
     if (!boutique) {
       try {
         const { data: remotePatron } = await supabase
@@ -559,7 +723,6 @@ export async function loginBoutique({
           .maybeSingle();
 
         if (remotePatron) {
-          // RÈGLE : Ne vérifie JAMAIS subscription_status dans patrons. Toujours chercher le vrai plan dans boutiques !
           let bInfo: any = null;
           try {
             const { data: bReal } = await supabase
@@ -575,8 +738,16 @@ export async function loginBoutique({
           const rawStatus = ((bInfo?.status || bInfo?.statut || '').toLowerCase().trim());
           const subEndDate = bInfo?.subscription_end_date || bInfo?.subscription_end || remotePatron.trial_end_date || remotePatron.subscription_end_date;
           const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
-          const isPlanNotTrial = rawPlan !== 'trial' && rawPlan !== 'essai' && rawPlan !== 'free' && rawPlan !== '';
-          const isPro = (isPlanNotTrial && isStatusActive) || rawPlan.includes('pro') || rawPlan.includes('populaire') || Number(bInfo?.last_payment_amount) >= 50000;
+          const isPopulaire =
+            rawPlan === 'populaire' ||
+            rawPlan.includes('populaire') ||
+            rawPlan.includes('16500') ||
+            rawPlan.includes('prolonge');
+          const isPro =
+            !isPopulaire &&
+            (rawPlan === 'pro' ||
+              (rawPlan.includes('pro') && !rawPlan.includes('prolonge')) ||
+              Number(bInfo?.last_payment_amount) >= 50000);
 
           boutique = {
             id: remotePatron.id,
@@ -585,8 +756,15 @@ export async function loginBoutique({
             nom_patron: remotePatron.nom || 'Patron',
             pin_patron_hash: remotePatron.pin_hash || '',
             pin_code: remotePatron.pin_code || remotePatron.code_pin || '',
-            plan: isPro ? 'pro' : (rawPlan || 'essai'),
+            genre: remotePatron.genre === 'homme' ? 'homme' : 'femme',
+            patron_photo_url: remotePatron.photo_profil || remotePatron.photo_url || undefined,
+            telephone: remotePatron.telephone || '',
+            whatsapp_number: remotePatron.phone_full || remotePatron.telephone || '',
+            phone_country: remotePatron.phone_country || '+228',
+            phone_number: remotePatron.phone_number || '',
+            plan: isPro ? 'pro' : isPopulaire ? 'populaire' : 'essai',
             date_fin_essai: subEndDate || new Date(Date.now() + 365 * 86400000).toISOString(),
+            date_inscription: remotePatron.date_inscription || remotePatron.created_at,
             created_at: remotePatron.created_at || new Date().toISOString(),
             status: isStatusActive ? 'active' : 'active',
             subscription_end: subEndDate,

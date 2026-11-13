@@ -48,8 +48,12 @@ export const AmbassadriceScreen: React.FC<AmbassadriceScreenProps> = ({
 
   const accord = getAccord(patron.genre);
 
-  // Code Parrain Officiel
-  const referralCode = patron.referral_code || (patron as any).code_parrain || 'EFA-ACONTA';
+  // Code Parrain Officiel (patrons.code_parrainage en priorité)
+  const referralCode =
+    patron.code_parrainage ||
+    patron.referral_code ||
+    (patron as any).code_parrain ||
+    'EFA-ACONTA';
 
   // Lien officiel de parrainage : https://efa-aconta.vercel.app?ref=VOTRE_CODE
   const lienInviteUrl = `https://efa-aconta.vercel.app?ref=${referralCode}`;
@@ -59,7 +63,7 @@ export const AmbassadriceScreen: React.FC<AmbassadriceScreenProps> = ({
     let isMounted = true;
     setIsLoadingFilleuls(true);
 
-    getFilleulsForParrain(referralCode)
+    getFilleulsForParrain(referralCode, patron.id)
       .then((data) => {
         if (!isMounted) return;
         // Si la recherche distante/locale renvoie des résultats
@@ -131,45 +135,21 @@ export const AmbassadriceScreen: React.FC<AmbassadriceScreenProps> = ({
     nextThreshold = 11;
   }
 
-  // Copier le lien
+  // Copier le lien (aucune insertion dans parrainage au clic : l'insertion se fait uniquement à l'inscription du filleul)
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(lienInviteUrl);
+    if (navigator?.clipboard) {
+      navigator.clipboard.writeText(lienInviteUrl).catch(() => {});
+    }
     setCopied(true);
     speakFrench('Lien de parrainage copié !');
     setTimeout(() => setCopied(false), 2500);
-
-    try {
-      supabase.from('parrainage').upsert([{
-        id: 'parr_' + patron.id,
-        parrain_id: patron.id,
-        filleul_nom: patron.nom_boutique || patron.nom || 'Ambassadrice',
-        lien_code: referralCode,
-        filleul_phone: patron.telephone || '',
-        status: 'attente',
-        mois_gagnes: totalMoisGagnes,
-        date_inscription: new Date().toISOString(),
-      }], { onConflict: 'id' }).then(() => {}, () => {});
-    } catch {}
   };
 
-  // PARTAGE SUR WHATSAPP : Texte exact demandé
+  // PARTAGE SUR WHATSAPP : Texte exact demandé (aucune écriture Supabase ici)
   const handleShareWhatsApp = () => {
-    const message = `Rejoins EFA ACONTA avec mon lien : ${lienInviteUrl} - Paye 1 AN et on gagne 2 MOIS GRATUITS chacun !`;
+    const message = `Rejoins EFA ACONTA avec mon lien : ${lienInviteUrl} - Paye 11 mois au lieu de 12 sur l'abonnement 1 AN !`;
     const textEncoded = encodeURIComponent(message);
     window.open(`https://api.whatsapp.com/send?text=${textEncoded}`, '_blank');
-
-    try {
-      supabase.from('parrainage').upsert([{
-        id: 'parr_' + patron.id,
-        parrain_id: patron.id,
-        filleul_nom: patron.nom_boutique || patron.nom || 'Ambassadrice',
-        lien_code: referralCode,
-        filleul_phone: patron.telephone || '',
-        status: 'attente',
-        mois_gagnes: totalMoisGagnes,
-        date_inscription: new Date().toISOString(),
-      }], { onConflict: 'id' }).then(() => {}, () => {});
-    } catch {}
   };
 
   // Fermeture automatique du toast après 4 secondes
@@ -293,10 +273,10 @@ export const AmbassadriceScreen: React.FC<AmbassadriceScreenProps> = ({
               RÈGLE D'OR DU PARRAINAGE :
             </h4>
             <p className="text-sm font-bold text-emerald-800">
-              Quand une commerçante que tu invites paye un abonnement <strong>1 AN</strong> (Populaire 16.500F ou Boutique Pro 90.000F) :
+              Quand une commerçante que tu invites paye un abonnement <strong>1 AN</strong> (11 mois payés au lieu de 12 — Populaire 16.500F ou Boutique Pro 90.000F) :
             </p>
             <div className="mt-2 inline-block px-4 py-2 bg-emerald-600 text-white font-black text-base rounded-xl shadow-md">
-              🎁 TU GAGNES IMMÉDIATEMENT +60 JOURS (2 MOIS) GRATUITS !
+              🎁 TU GAGNES IMMÉDIATEMENT +60 JOURS GRATUITS (PARRAIN SEUL, 1 FOIS PAR FILLEUL) !
             </div>
           </div>
         </div>

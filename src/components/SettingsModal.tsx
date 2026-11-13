@@ -30,7 +30,6 @@ import {
   Trash2,
   Laptop,
   Bell,
-  MapPin,
 } from 'lucide-react';
 import type { Patron, CurrentUser, Employe } from '../lib/types';
 import { verifyPin, hashPin } from '../lib/security';
@@ -47,10 +46,13 @@ import { supabase } from '../lib/supabase';
 import { logAction } from '../lib/historique';
 import { BoutonRetour } from './BoutonRetour';
 import { takePhotoFromCamera, pickPhotoFromGallery } from '../lib/camera';
+import { uploadProfilePhoto } from '../lib/productStorage';
+import { ensurePatronExistsInSupabase, safeSupabaseWrite } from '../lib/supabaseHelper';
 import {
   getBoutiqueDevices,
   disconnectDevice,
   getDeviceId,
+  getActiveBoutiqueId,
   DEVICE_LIMITS,
   type EfaDeviceRecord,
 } from '../lib/deviceAuth';
@@ -84,7 +86,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   // Paramètres réservés exclusivement à la boutique principale (aucun paramètre pour btq 2/3)
   const isSubStore = patron.type === 'SUB' || Boolean(patron.parentId);
-  if (!isOpen || isSubStore) return null;
 
   // Changement de PIN
   const [isChangingPin, setIsChangingPin] = useState(false);
@@ -126,10 +127,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isSavingProfilPatron, setIsSavingProfilPatron] = useState(false);
   const [profilPatronFeedback, setProfilPatronFeedback] = useState<string | null>(null);
 
-  // BLOC 2: Ma Boutique (photo_devanture + nom boutique + adresse)
+  // BLOC 2: Ma Boutique (Nom de la boutique uniquement + bouton Modifier à côté)
   const [boutiqueNom, setBoutiqueNom] = useState(patron.nom_boutique || '');
-  const [boutiqueDevantureUrl, setBoutiqueDevantureUrl] = useState<string>(patron.photo_devanture || (patron as any).devanture_url || '');
-  const [boutiqueAdresse, setBoutiqueAdresse] = useState(patron.adresse || (patron as any).adresse_boutique || '');
   const [isSavingBoutiqueBloc, setIsSavingBoutiqueBloc] = useState(false);
   const [boutiqueBlocFeedback, setBoutiqueBlocFeedback] = useState<string | null>(null);
 
@@ -151,15 +150,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   useEffect(() => {
-    if (isOpen && patron?.id) {
+    if (isOpen && !isSubStore && patron?.id) {
+      const activeBtqId = getActiveBoutiqueId(patron) || patron.id;
       setCurrentDeviceId(getDeviceId());
       setIsLoadingDevices(true);
       getBoutiqueDevices(patron.id)
         .then((devs) => setDevicesList(devs))
         .catch(console.error)
         .finally(() => setIsLoadingDevices(false));
+
+      // Recharger depuis Supabase à chaque ouverture (pas de cache local obsolète)
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        (async () => {
+          try {
+            const [{ data: remotePat }, { data: remoteBtq }] = await Promise.all([
+              supabase.from('patrons').select('*').eq('id', patron.id).maybeSingle(),
+              supabase.from('boutiques').select('*').eq('id', activeBtqId).maybeSingle(),
+            ]);
+
+            if (remotePat) {
+              setPatronNom(remotePat.nom || remoteBtq?.proprietaire || patron.nom || '');
+              setPatronPhotoUrl(remotePat.photo_url || remotePat.photo_profil || '');
+            } else {
+              setPatronNom(remoteBtq?.proprietaire || patron.nom || '');
+              setPatronPhotoUrl('');
+            }
+
+            if (remoteBtq) {
+              setBoutiqueNom(remoteBtq.nom_boutique || remotePat?.nom_boutique || patron.nom_boutique || remoteBtq.nom || '');
+            } else if (remotePat) {
+              setBoutiqueNom(remotePat.nom_boutique || patron.nom_boutique || '');
+            }
+          } catch (loadErr) {
+            console.warn('[Settings] Note rechargement profil Supabase:', loadErr);
+          }
+        })();
+      } else {
+        setPatronNom(patron.nom || '');
+        setPatronPhotoUrl(patron.photo_url || patron.photo_profil || '');
+        setBoutiqueNom(patron.nom_boutique || '');
+      }
     }
-  }, [isOpen, patron?.id]);
+  }, [isOpen, isSubStore, patron?.id]);
 
   const handleDisconnectDevice = async (deviceIdToDisconnect: string) => {
     if (!confirm('Voulez-vous vraiment déconnecter cette session ?')) return;
@@ -337,51 +369,104 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
+  if (!isOpen || isSubStore) return null;
 
-  // BLOC 1 : Sauvegarde simultanée Photo de profil + Nom patron
+  // BLOC 1 : Sauvegarde simultanée Photo de profil patron + Nom patron (upload bucket efa-photos + patrons.photo_profil)
   const handleSaveProfilPatron = async () => {
     if (!patronNom.trim()) return;
     setIsSavingProfilPatron(true);
     setProfilPatronFeedback(null);
     const newNom = patronNom.trim();
-    const photo = patronPhotoUrl || undefined;
     const oldNom = patron.nom;
 
     try {
-      const updated: Patron = { ...patron, nom: newNom, photo_url: photo };
-      await db.patrons.update(patron.id, { nom: newNom, photo_url: photo });
-      await queueSyncItem('patrons', 'update', patron.id, { nom: newNom, photo_url: photo || null });
-
-      try {
-        await supabase.from('boutiques').update({
-          proprietaire: newNom,
-          photo_url: photo || null,
-          photo_profil: photo || null,
-          updated_at: new Date().toISOString(),
-        }).eq('id', patron.id);
-
-        await supabase.from('patrons').update({
-          nom: newNom,
-          photo_url: photo || null,
-        }).eq('id', patron.id);
-      } catch (err) {
-        console.warn('Erreur sauvegarde profil patron Supabase:', err);
+      let finalPhotoUrl = patronPhotoUrl.trim();
+      if (finalPhotoUrl && (finalPhotoUrl.startsWith('data:') || finalPhotoUrl.startsWith('blob:'))) {
+        finalPhotoUrl = await uploadProfilePhoto(finalPhotoUrl, patron.id, 'patron');
+        setPatronPhotoUrl(finalPhotoUrl);
       }
+
+      const photoVal = finalPhotoUrl || null;
+      let savedNom = newNom;
+      let savedPhoto: string | undefined = finalPhotoUrl || undefined;
+
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        await ensurePatronExistsInSupabase(patron.id, patron);
+        const { error: patErr } = await safeSupabaseWrite(
+          'patrons',
+          'update',
+          {
+            nom: newNom,
+            photo_profil: photoVal,
+            photo_url: photoVal,
+          },
+          { column: 'id', value: patron.id }
+        );
+        if (patErr) {
+          throw new Error(patErr.message || 'Erreur mise à jour table patrons');
+        }
+
+        await safeSupabaseWrite(
+          'boutiques',
+          'update',
+          {
+            proprietaire: newNom,
+            updated_at: new Date().toISOString(),
+          },
+          { column: 'id', value: patron.id }
+        );
+
+        // Relecture directe depuis Supabase (méthode exacte employé : upload + UPDATE + relecture)
+        try {
+          const { data: freshPat } = await supabase
+            .from('patrons')
+            .select('*')
+            .eq('id', patron.id)
+            .maybeSingle();
+          if (freshPat) {
+            savedNom = freshPat.nom || newNom;
+            const rereadPhoto = freshPat.photo_url || freshPat.photo_profil || finalPhotoUrl || undefined;
+            savedPhoto = rereadPhoto;
+            setPatronNom(savedNom);
+            setPatronPhotoUrl(rereadPhoto || '');
+          }
+        } catch {}
+      } else {
+        await queueSyncItem('patrons', 'update', patron.id, {
+          nom: newNom,
+          photo_profil: photoVal,
+          photo_url: photoVal,
+        });
+      }
+
+      const updated: Patron = {
+        ...patron,
+        nom: savedNom,
+        photo_url: savedPhoto,
+        photo_profil: savedPhoto,
+      };
+
+      await db.patrons.update(patron.id, {
+        nom: savedNom,
+        photo_url: savedPhoto,
+        photo_profil: savedPhoto,
+      });
 
       logAction({
         patron_id: patron.id,
         boutique_id: patron.id,
         action_type: 'modif_stock',
-        description: `Modification profil patron : nom changé de "${oldNom}" en "${newNom}"`,
+        description: `Modification profil patron : nom changé de "${oldNom}" en "${savedNom}"`,
       }).catch(console.error);
 
       onPatronUpdated(updated);
+      onDataRefresh?.();
       setProfilPatronFeedback('Profil modifié avec succès !');
-      speakFrench(`Profil patron mis à jour : ${newNom}`);
+      speakFrench(`Profil patron mis à jour : ${savedNom}`);
       setTimeout(() => setProfilPatronFeedback(null), 3000);
-    } catch {
-      setProfilPatronFeedback('Erreur lors de la modification');
+    } catch (err: any) {
+      console.error('Erreur sauvegarde profil patron:', err);
+      setProfilPatronFeedback(err?.message || 'Erreur lors de la modification');
     } finally {
       setIsSavingProfilPatron(false);
     }
@@ -411,94 +496,123 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setPatronPhotoUrl('');
   };
 
-  // BLOC 2 : Sauvegarde simultanée Photo devanture + Nom boutique + Adresse
+  // BLOC 2 : Sauvegarde Nom de la boutique uniquement (UPDATE boutiques SET nom_boutique = ... WHERE id = boutique_actuelle)
   const handleSaveBoutiqueBloc = async () => {
     if (!boutiqueNom.trim()) return;
     setIsSavingBoutiqueBloc(true);
     setBoutiqueBlocFeedback(null);
     const newNom = boutiqueNom.trim();
-    const newAdresse = boutiqueAdresse.trim();
-    const photo = boutiqueDevantureUrl || undefined;
     const oldNom = patron.nom_boutique;
+    const activeBoutiqueId = getActiveBoutiqueId(patron) || patron.id;
 
     try {
+      let savedNom = newNom;
+
+      // Mettre à jour l'UI immédiatement en mémoire & Dexie + localStorage
+      await db.patrons.update(patron.id, { nom_boutique: newNom } as any);
+      if (activeBoutiqueId !== patron.id) {
+        await db.patrons.update(activeBoutiqueId, { nom_boutique: newNom } as any).catch(() => {});
+      }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('currentBoutiqueName', newNom);
+        if (localStorage.getItem('deviceStoreId') === activeBoutiqueId) {
+          localStorage.setItem('deviceStoreName', newNom);
+        }
+      }
+      onPatronUpdated({ ...patron, nom_boutique: newNom });
+
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const { error: btqErr } = await safeSupabaseWrite(
+          'boutiques',
+          'update',
+          {
+            nom_boutique: newNom,
+            updated_at: new Date().toISOString(),
+          },
+          { column: 'id', value: activeBoutiqueId }
+        );
+        if (btqErr) {
+          throw new Error(btqErr.message || 'Erreur mise à jour table boutiques');
+        }
+
+        if (activeBoutiqueId === patron.id) {
+          await ensurePatronExistsInSupabase(patron.id, patron);
+          await safeSupabaseWrite(
+            'patrons',
+            'update',
+            { nom_boutique: newNom },
+            { column: 'id', value: activeBoutiqueId }
+          ).catch(() => {});
+        }
+
+        // Relecture directe depuis Supabase
+        try {
+          const { data: freshBtq } = await supabase
+            .from('boutiques')
+            .select('nom_boutique')
+            .eq('id', activeBoutiqueId)
+            .maybeSingle();
+          if (freshBtq?.nom_boutique) {
+            savedNom = freshBtq.nom_boutique;
+            setBoutiqueNom(savedNom);
+          }
+        } catch {}
+      } else {
+        await queueSyncItem('boutiques', 'update', activeBoutiqueId, {
+          nom_boutique: newNom,
+        });
+        if (activeBoutiqueId === patron.id) {
+          await queueSyncItem('patrons', 'update', activeBoutiqueId, {
+            nom_boutique: newNom,
+          });
+        }
+      }
+
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('currentBoutiqueName', savedNom);
+        if (localStorage.getItem('deviceStoreId') === activeBoutiqueId) {
+          localStorage.setItem('deviceStoreName', savedNom);
+        }
+        try {
+          const rawDev = localStorage.getItem('efa_device_boutique');
+          if (rawDev) {
+            const parsedDev = JSON.parse(rawDev);
+            if (parsedDev && parsedDev.id === activeBoutiqueId) {
+              parsedDev.nom_boutique = savedNom;
+              parsedDev.nom_affichage = savedNom;
+              localStorage.setItem('efa_device_boutique', JSON.stringify(parsedDev));
+            }
+          }
+        } catch {}
+      }
+
       const updated: Patron = {
         ...patron,
-        nom_boutique: newNom,
-        photo_devanture: photo,
-        adresse: newAdresse || undefined,
+        nom_boutique: savedNom,
       };
+
       await db.patrons.update(patron.id, {
-        nom_boutique: newNom,
-        photo_devanture: photo,
-        adresse: newAdresse || undefined,
+        nom_boutique: savedNom,
       } as any);
-      await queueSyncItem('patrons', 'update', patron.id, {
-        nom_boutique: newNom,
-        photo_devanture: photo || null,
-        adresse: newAdresse || null,
-      });
-
-      try {
-        await supabase.from('boutiques').update({
-          nom_boutique: newNom,
-          nom: newNom,
-          photo_devanture: photo || null,
-          devanture_url: photo || null,
-          adresse: newAdresse || null,
-          adresse_boutique: newAdresse || null,
-          updated_at: new Date().toISOString(),
-        }).eq('id', patron.id);
-
-        await supabase.from('patrons').update({
-          nom_boutique: newNom,
-          photo_devanture: photo || null,
-          adresse: newAdresse || null,
-        } as any).eq('id', patron.id);
-      } catch (err) {
-        console.warn('Erreur sauvegarde boutique Supabase:', err);
-      }
 
       logAction({
         patron_id: patron.id,
-        boutique_id: patron.id,
+        boutique_id: activeBoutiqueId,
         action_type: 'modif_stock',
-        description: `Modification boutique : nom changé de "${oldNom}" en "${newNom}"`,
+        description: `Modification boutique : nom changé de "${oldNom}" en "${savedNom}"`,
       }).catch(console.error);
 
       onPatronUpdated(updated);
-      setBoutiqueBlocFeedback('Boutique modifiée avec succès !');
-      speakFrench(`Boutique mise à jour : ${newNom}`);
+      onDataRefresh?.();
+      setBoutiqueBlocFeedback('Nom de la boutique modifié !');
+      speakFrench(`Boutique mise à jour : ${savedNom}`);
       setTimeout(() => setBoutiqueBlocFeedback(null), 3000);
-    } catch {
-      setBoutiqueBlocFeedback('Erreur lors de la modification');
+    } catch (err: any) {
+      console.error('Erreur sauvegarde boutique:', err);
+      setBoutiqueBlocFeedback(err?.message || 'Erreur lors de la modification');
     } finally {
       setIsSavingBoutiqueBloc(false);
     }
-  };
-
-  const handleCameraDevanturePhoto = async () => {
-    const photo = await takePhotoFromCamera({
-      formKey: 'boutique_devanture',
-      formData: { id: patron.id, nom: boutiqueNom },
-    });
-    if (photo) {
-      setBoutiqueDevantureUrl(photo);
-    }
-  };
-
-  const handleGalleryDevanturePhoto = async () => {
-    const photo = await pickPhotoFromGallery({
-      formKey: 'boutique_devanture',
-      formData: { id: patron.id, nom: boutiqueNom },
-    });
-    if (photo) {
-      setBoutiqueDevantureUrl(photo);
-    }
-  };
-
-  const handleRemoveDevanturePhoto = () => {
-    setBoutiqueDevantureUrl('');
   };
 
   const handleSaveEditEmpNom = async (e: React.FormEvent) => {
@@ -1011,96 +1125,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* BLOC 2: MA BOUTIQUE (Photo devanture + Nom boutique + Adresse -> 1 seul bouton Modifier au bas du bloc) */}
-        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-3.5">
+        {/* BLOC 2: MA BOUTIQUE (Nom de la boutique + bouton Modifier à côté, sans photo) */}
+        <div className="p-3.5 sm:p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-2.5">
           <div className="flex items-center gap-2">
             <Store className="w-4 h-4 text-indigo-600" />
-            <h4 className="font-black text-xs sm:text-sm text-gray-900">Ma boutique (Principale)</h4>
+            <h4 className="font-black text-xs sm:text-sm text-gray-900">Ma boutique</h4>
           </div>
 
-          {/* Photo de devanture */}
-          <div className="flex items-center gap-3 py-1">
-            <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-indigo-100 flex items-center justify-center overflow-hidden border-2 border-indigo-300 shrink-0 shadow-xs">
-              {boutiqueDevantureUrl ? (
-                <img src={boutiqueDevantureUrl} alt="Devanture" className="w-full h-full object-cover" />
-              ) : (
-                <Store className="w-7 h-7 text-indigo-400 stroke-[1.8]" />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <span className="block text-[11px] font-bold text-gray-600 mb-1">
-                Photo de la devanture :
-              </span>
-              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-                <button
-                  type="button"
-                  onClick={handleCameraDevanturePhoto}
-                  className="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 active:scale-95 text-xs font-black text-white cursor-pointer flex items-center gap-1.5 shadow-xs transition touch-manipulation border border-teal-500/20"
-                >
-                  <Camera className="w-3.5 h-3.5 stroke-[2.5]" />
-                  <span>Caméra</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleGalleryDevanturePhoto}
-                  className="px-3 py-1.5 rounded-xl bg-[#6C5CE7] hover:bg-[#5b4bc4] active:scale-95 text-xs font-black text-white cursor-pointer flex items-center gap-1.5 shadow-xs transition touch-manipulation border border-indigo-500/20"
-                >
-                  <ImageIcon className="w-3.5 h-3.5 stroke-[2.5]" />
-                  <span>Galerie</span>
-                </button>
-                {boutiqueDevantureUrl && (
-                  <button
-                    type="button"
-                    onClick={handleRemoveDevanturePhoto}
-                    className="px-2 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold transition active:scale-95 cursor-pointer border border-red-200"
-                  >
-                    Retirer
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Champ Nom Boutique */}
           <div className="space-y-1.5">
             <label className="block text-xs font-bold text-gray-600">Nom de la boutique :</label>
-            <input
-              type="text"
-              required
-              value={boutiqueNom}
-              onChange={(e) => setBoutiqueNom(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
-            />
-          </div>
-
-          {/* Champ Adresse Boutique */}
-          <div className="space-y-1.5 pt-1 border-t border-indigo-100">
-            <label className="block text-xs font-bold text-gray-600 flex items-center gap-1">
-              <MapPin className="w-3.5 h-3.5 text-indigo-500" />
-              <span>Adresse / Quartier de la boutique :</span>
-            </label>
-            <input
-              type="text"
-              value={boutiqueAdresse}
-              onChange={(e) => setBoutiqueAdresse(e.target.value)}
-              placeholder="Ex: Marché de Lomé, Assigamé"
-              className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
-            />
-          </div>
-
-          {/* 1 SEUL BOUTON MODIFIER EN BAS DU BLOC 2 */}
-          <div className="pt-1 space-y-1.5">
-            <button
-              type="button"
-              onClick={handleSaveBoutiqueBloc}
-              disabled={isSavingBoutiqueBloc}
-              className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-98 text-white font-black text-xs sm:text-sm shadow-xs transition cursor-pointer flex items-center justify-center gap-2"
-            >
-              <Check className="w-4 h-4 stroke-[2.5]" />
-              <span>{isSavingBoutiqueBloc ? 'Modification en cours...' : 'Modifier'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                required
+                value={boutiqueNom}
+                onChange={(e) => setBoutiqueNom(e.target.value)}
+                className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-300 font-bold text-xs sm:text-sm bg-white text-gray-900 focus:outline-none focus:border-indigo-600 shadow-xs"
+              />
+              <button
+                type="button"
+                onClick={handleSaveBoutiqueBloc}
+                disabled={isSavingBoutiqueBloc}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-xs sm:text-sm shadow-xs transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+              >
+                <Check className="w-4 h-4 stroke-[2.5]" />
+                <span>{isSavingBoutiqueBloc ? '...' : 'Modifier'}</span>
+              </button>
+            </div>
             {boutiqueBlocFeedback && (
-              <p className="text-xs font-bold text-emerald-600 flex items-center justify-center gap-1">
+              <p className="text-xs font-bold text-emerald-600 flex items-center gap-1 pt-0.5">
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
                 <span>{boutiqueBlocFeedback}</span>
               </p>

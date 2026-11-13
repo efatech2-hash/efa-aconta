@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS public.patrons (
     pin_hash TEXT,
     pin_code TEXT,
     photo_url TEXT,
+    photo_profil TEXT,
+    adresse TEXT,
+    code_parrainage TEXT,
+    referral_code TEXT,
+    referred_by TEXT,
     genre TEXT DEFAULT 'femme',
     role TEXT DEFAULT 'patron',
     trial_start_date TIMESTAMPTZ,
@@ -121,8 +126,13 @@ CREATE TABLE IF NOT EXISTS public.parrainage (
     id TEXT PRIMARY KEY,
     parrain_id TEXT REFERENCES public.patrons(id) ON DELETE CASCADE,
     filleul_id TEXT,
+    boutique_id TEXT,
     lien_code TEXT,
-    status TEXT DEFAULT 'pending',
+    filleul_nom TEXT,
+    filleul_phone TEXT,
+    mois_gagnes INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'attente',
+    date_inscription TIMESTAMPTZ DEFAULT NOW(),
     date_parrainage TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -153,7 +163,7 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
 );
 
 -- 11. Table Boutiques Centrale (Synchronisation multi-appareils & Super Admin)
--- Liste EXACTE vérifiée: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, referred_by_code, referred_by, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
+-- Liste EXACTE vérifiée: id, nom_boutique, nom, proprietaire, patron_id, email, telephone, referral_code, code_parrainage, referred_by_code, referred_by, photo_profil, photo_devanture, adresse, subscription_end_date, subscription_end, has_paid_annuel, is_active, last_payment_amount, plan, status, created_at, updated_at, pin_code, whatsapp_number, whatsapp
 CREATE TABLE IF NOT EXISTS public.boutiques (
     id TEXT PRIMARY KEY,
     nom_boutique TEXT NOT NULL,
@@ -163,8 +173,12 @@ CREATE TABLE IF NOT EXISTS public.boutiques (
     email TEXT,
     telephone TEXT,
     referral_code TEXT,
+    code_parrainage TEXT,
     referred_by_code TEXT,
     referred_by TEXT,
+    photo_profil TEXT,
+    photo_devanture TEXT,
+    adresse TEXT,
     subscription_end_date TIMESTAMPTZ,
     subscription_end TIMESTAMPTZ,
     has_paid_annuel BOOLEAN DEFAULT FALSE,

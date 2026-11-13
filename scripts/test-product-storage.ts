@@ -106,11 +106,11 @@ async function runStorageOptimizationTests() {
   // =========================================================================
   // TEST 3 : BUCKET UNIQUE & CHEMIN STRICT : ${user_id}/${produit_id}.webp
   // =========================================================================
-  console.log('\n--- 3. TEST BUCKET efa-aconta-produits & CHEMIN STRICT ---');
+  console.log('\n--- 3. TEST BUCKET efa-photos & CHEMIN STRICT ---');
 
   const testProdId = 'prod_test_456';
   assert(
-    PRODUCT_STORAGE_BUCKET === 'efa-aconta-produits',
+    PRODUCT_STORAGE_BUCKET === 'efa-photos',
     `Bucket unique vérifié : ${PRODUCT_STORAGE_BUCKET}`
   );
 

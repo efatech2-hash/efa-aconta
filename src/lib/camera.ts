@@ -117,7 +117,7 @@ export async function uploadToSupabaseStorageInBackground(
     const filePath = `${prefix}/${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`;
 
     const { withTimeout } = await import('./supabaseHelper');
-    const uploadPromise = supabase.storage.from('photos').upload(filePath, blob, {
+    const uploadPromise = supabase.storage.from('efa-photos').upload(filePath, blob, {
       contentType: blob.type || 'image/jpeg',
       upsert: true,
     });
@@ -126,7 +126,7 @@ export async function uploadToSupabaseStorageInBackground(
       console.warn('[EFA Storage] Note: upload background Supabase (fallback base64 actif):', error.message);
       return null;
     }
-    const { data: pubData } = supabase.storage.from('photos').getPublicUrl(filePath);
+    const { data: pubData } = supabase.storage.from('efa-photos').getPublicUrl(filePath);
     return pubData?.publicUrl || null;
   } catch (err) {
     console.warn('[EFA Storage] Background upload timeout/skipped (photo locale OK):', err);

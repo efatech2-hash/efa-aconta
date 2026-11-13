@@ -183,8 +183,9 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
 
   const accord = getAccord(patron.genre);
   const currentPlan = isPro ? 'pro' : (patron.subscription_status || 'trial');
-  const maxAllowedEmployes = isPro ? 10 : (PLAN_CONFIGS[currentPlan]?.maxEmployes ?? 3);
-  const canAddMore = isPro ? totalEmployesPro < 10 : canAddEmploye(patron, employes.length);
+  const maxAllowedEmployes = getLimites(currentPlan).maxVendeurs;
+  const activeEmployes = employes.filter((e) => e.status !== 'deleted' && !e.is_deleted);
+  const canAddMore = isPro ? totalEmployesPro < maxAllowedEmployes : canAddEmploye(patron, activeEmployes.length);
 
   // Capture / Sélection photo in-app Capacitor sans navigation externe ni rechargement
   const handleCamera = async () => {
@@ -513,7 +514,7 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
           <Shield className="w-8 h-8 text-[#6C5CE7] flex-shrink-0" />
           <div>
             <h4 className="font-black text-lg text-gray-900">
-              Protection {accord.titrePatron} Garantie (3 accès max)
+              Protection {accord.titrePatron} Garantie ({maxAllowedEmployes} vendeur{maxAllowedEmployes > 1 ? 's' : ''} max)
             </h4>
             <p className="text-xs sm:text-sm font-bold text-purple-800 mt-0.5">
               Chaque vendeur(se) peut seulement enregistrer des ventes. Il/elle ne voit <strong>JAMAIS</strong> ton solde de caisse, ni tes dépenses, ni tes bénéfices.

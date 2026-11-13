@@ -124,10 +124,17 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   const isPro = isProActive(patron);
   const isSubOfPro = Boolean(patron.isSubOfPro || (isSubStore && isPro));
 
-  // Bienvenue patron / patronne automatique selon le genre
+  // Bienvenue Patron / Bienvenue Patronne dynamique selon patrons.genre (jamais en dur)
+  const patronGenre = patron.genre || currentUser.genre || 'femme';
   const welcomePrefix = currentUser.role === 'patron'
-    ? ((currentUser.genre || patron.genre) === 'homme' ? 'Bienvenue patron' : 'Bienvenue patronne')
-    : (currentUser.genre === 'homme' ? 'Bienvenue vendeur' : 'Bienvenue vendeuse');
+    ? (patronGenre === 'homme' ? 'Bienvenue Patron' : 'Bienvenue Patronne')
+    : (currentUser.genre === 'homme' ? 'Bienvenue Vendeur' : 'Bienvenue Vendeuse');
+
+  // Photo de profil de l'utilisateur connecté (Patron ou Vendeur) — aucune photo boutique
+  const dashboardProfilePhoto =
+    currentUser.photo_url ||
+    (currentUser.role === 'patron' ? (patron.photo_url || (patron as any).photo_profil) : '') ||
+    '';
 
   return (
     <>
@@ -144,9 +151,9 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                 title="Voir la photo de profil (grand format)"
                 aria-label="Voir la photo de profil"
               >
-                {currentUser.photo_url ? (
+                {dashboardProfilePhoto ? (
                   <img
-                    src={currentUser.photo_url}
+                    src={dashboardProfilePhoto}
                     alt={currentUser.nom}
                     className="w-9 h-9 sm:w-11 sm:h-11 rounded-2xl object-cover border-2 border-[#6C5CE7] shadow-sm group-hover:scale-105 transition"
                   />
@@ -423,7 +430,7 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                     {currentUser.prenom || currentUser.nom}
                   </div>
                   <div className="text-[11px] font-bold text-[#6C5CE7] truncate">
-                    {currentUser.role === 'patron' ? 'Patron' : 'Vendeur'} • {patron.nom_boutique || 'Ma Boutique'}
+                    {currentUser.role === 'patron' ? accord.titrePatron : accord.titreVendeur} • {patron.nom_boutique || 'Ma Boutique'}
                   </div>
                 </div>
               </div>
@@ -721,7 +728,7 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                   {currentUser.prenom || currentUser.nom}
                 </h3>
                 <p className="text-xs text-gray-300 font-semibold truncate">
-                  {currentUser.role === 'patron' ? 'Patron' : 'Vendeur/se'} • {patron.nom_boutique || 'Ma Boutique'}
+                  {currentUser.role === 'patron' ? accord.titrePatron : accord.titreVendeur} • {patron.nom_boutique || 'Ma Boutique'}
                 </p>
               </div>
             </div>
@@ -740,9 +747,9 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
             className="flex-1 flex items-center justify-center p-2"
             onClick={() => setIsPhotoViewerOpen(false)}
           >
-            {currentUser.photo_url ? (
+            {dashboardProfilePhoto ? (
               <img
-                src={currentUser.photo_url}
+                src={dashboardProfilePhoto}
                 alt={currentUser.nom}
                 className="max-w-full max-h-[75vh] w-auto h-auto rounded-3xl object-contain shadow-2xl border border-white/20 animate-in zoom-in-95 duration-200"
                 onClick={(e) => e.stopPropagation()}

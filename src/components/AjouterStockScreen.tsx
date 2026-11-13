@@ -19,10 +19,11 @@ import { queueSyncItem } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
 import { logAction } from '../lib/historique';
 import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites } from '../lib/checkLimits';
-import { isPatronGloballyPro, getTotalArticleCount, getMainStoreId } from '../lib/mesBoutiques';
+import { getMainStoreId } from '../lib/mesBoutiques';
 import { checkProductQuota, uploadProductImage } from '../lib/productStorage';
 import { normalizePlanForCompression, type ProductPlan } from '../lib/productCompressor';
 import { supabase } from '../lib/supabase';
+import { upsertProduitSafely } from '../lib/supabaseHelper';
 import {
   takePhotoFromCamera,
   pickPhotoFromGallery,
@@ -89,7 +90,9 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
   const numAchat = parseInt(prixAchat, 10) || 0;
   const numVente = parseInt(prixVente, 10) || 0;
   const marge = numVente - numAchat;
-  const isLimitReached = !canAddArticle(patron, products.length);
+  const activeProducts = products.filter((p) => p.status !== 'deleted' && !p.is_deleted);
+  const currentLimites = getLimites(patron.subscription_status === 'pro' || patron.isProActive ? 'pro' : (patron.subscription_status || 'essai'));
+  const isLimitReached = !canAddArticle(patron, activeProducts.length);
 
   // Capture CAMÉRA in-app Capacitor
   const handleCamera = async () => {
@@ -201,22 +204,20 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
     const prodId = 'prod-' + Date.now();
     let finalPhotoUrl = photoUrl;
 
-    // D'ABORD uploader le vrai fichier vers le bucket 'efa-aconta-produits'
+    // D'ABORD uploader le vrai fichier vers le bucket 'efa-photos'
     if (photoUrl) {
       try {
         const uploaded = await uploadProductImage(photoUrl, patron.id, prodId, userPlan);
         if (uploaded) finalPhotoUrl = uploaded;
       } catch (uploadErr) {
-        console.error('[AjouterStock] Échec upload image, création produit annulée:', uploadErr);
-        setIsLoading(false);
-        return; // NE PAS créer le produit si l'upload échoue !
+        console.warn('[AjouterStock] Note upload image, fallback photo locale:', uploadErr);
       }
     }
 
     const newProduit: Produit = {
       id: prodId,
       boutique_id: patron.id,
-      patron_id: patron.id,
+      patron_id: mainStoreId || patron.id,
       nom: nom.trim(),
       photo_url: finalPhotoUrl,
       prix_achat: numAchat,
@@ -227,42 +228,34 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
     };
 
     try {
-      // 1. Enregistrement obligatoire sur Supabase (bloque si échec)
+      // 1. Vérifier que patron_id existe dans `patrons` (sinon utilise patron actuel) + upsert `produits` & `aconta_produits`
       if (typeof navigator !== 'undefined' && navigator.onLine) {
-        const { error: insertErr } = await supabase.from('produits').insert([{
-          id: prodId,
-          boutique_id: patron.id,
-          patron_id: mainStoreId || patron.id,
-          nom: newProduit.nom,
-          prix_vente: newProduit.prix_vente,
-          prix_achat: newProduit.prix_achat,
-          stock_qte: newProduit.stock_qte,
-          seuil_alerte: newProduit.seuil_alerte,
-          photo_url: finalPhotoUrl,
-          created_at: newProduit.created_at,
-        }]);
-
-        if (insertErr) {
-          console.error('[AjouterStock] Erreur Supabase:', insertErr);
-          setFeedback(`Erreur Supabase: ${insertErr.message}`);
-          speakFrench("Échec de l'enregistrement sur Supabase");
-          setIsLoading(false);
-          return;
-        }
-
-        // Miroir aconta_produits
-        try {
-          await supabase.from('aconta_produits').upsert([{
+        const { error: insertErr, resolvedPatronId } = await upsertProduitSafely(
+          {
             id: prodId,
-            user_id: patron.id,
+            boutique_id: patron.id,
+            patron_id: mainStoreId || patron.id,
             nom: newProduit.nom,
             prix_vente: newProduit.prix_vente,
             prix_achat: newProduit.prix_achat,
             stock_qte: newProduit.stock_qte,
+            seuil_alerte: newProduit.seuil_alerte,
             photo_url: finalPhotoUrl,
             created_at: newProduit.created_at,
-          }]);
-        } catch {}
+          },
+          patron
+        );
+        newProduit.patron_id = resolvedPatronId || patron.id;
+
+        if (insertErr) {
+          console.error('[AjouterStock] Erreur Supabase:', insertErr);
+          if (String(insertErr?.code || '') !== '23503') {
+            setFeedback(`Erreur Supabase: ${insertErr.message}`);
+            speakFrench("Échec de l'enregistrement sur Supabase");
+            setIsLoading(false);
+            return;
+          }
+        }
       }
 
       // 2. Cache local Dexie
@@ -322,7 +315,7 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
         </div>
       )}
 
-      {/* Bannière Limite Articles Atteinte */}
+      {/* Bannière Limite Articles Atteinte (affichée uniquement quand la limite est dépassée) */}
       {isLimitReached && (
         <div className="p-4 sm:p-5 rounded-3xl bg-amber-50 border-2 border-amber-300 text-amber-950 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
           <div className="flex items-center gap-3">
@@ -331,20 +324,22 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
             </div>
             <div>
               <h4 className="font-black text-sm sm:text-base">
-                Limite d'articles atteinte pour votre forfait ({products.length} articles)
+                Limite atteinte : {activeProducts.length} / {currentLimites.maxArticles} articles max
               </h4>
               <p className="text-xs font-semibold text-amber-800">
-                Passez à Boutique Pro pour débloquer jusqu'à 300 articles en stock !
+                {currentLimites.plan === 'essai'
+                  ? 'Passez à Populaire (100 articles) ou Pro (300 articles) pour continuer.'
+                  : 'Passez à Boutique Pro pour débloquer jusqu’à 300 articles !'}
               </p>
             </div>
           </div>
           {onOpenSubscriptionModal && (
             <button
               type="button"
-              onClick={() => onOpenSubscriptionModal('pro', 'Débloquer jusqu\'à 300 articles')}
+              onClick={() => onOpenSubscriptionModal(currentLimites.plan === 'essai' ? 'populaire' : 'pro', 'Augmenter votre limite d\'articles')}
               className="px-4 py-2 rounded-xl bg-[#0A53FF] hover:bg-blue-700 active:scale-95 text-white font-black text-xs shadow-md transition cursor-pointer shrink-0"
             >
-              Passer à Pro (300 articles) 👑
+              {currentLimites.plan === 'essai' ? 'Passer à Populaire (100)' : 'Passer à Pro (300 articles) 👑'}
             </button>
           )}
         </div>

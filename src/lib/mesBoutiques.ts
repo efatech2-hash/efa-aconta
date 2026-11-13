@@ -24,13 +24,23 @@ export function isProActive(patron?: Patron | null): boolean {
   const forfait = (patron.forfait || '').toLowerCase();
   const statut = (patron.statut || '').toLowerCase();
 
+  if (
+    plan.includes('populaire') ||
+    forfait.includes('populaire') ||
+    plan.includes('prolonge') ||
+    forfait.includes('prolonge') ||
+    forfait.includes('16500')
+  ) {
+    return false;
+  }
+
   return (
     patron.isProActive === true ||
     patron.isSubOfPro === true ||
     plan === 'pro' ||
-    plan.includes('pro') ||
-    forfait.includes('pro') ||
-    statut.includes('pro')
+    plan.startsWith('pro_') ||
+    (forfait.includes('pro') && !forfait.includes('prolonge')) ||
+    (statut.includes('pro') && !statut.includes('prolonge'))
   );
 }
 
@@ -54,11 +64,9 @@ export async function isPatronGloballyPro(patron?: Patron | null): Promise<boole
       if (btqs && btqs.length > 0) {
         const found = btqs.some((b) => {
           const p = (b.plan || '').toLowerCase().trim();
-          const s = (b.status || (b as any).statut || '').toLowerCase().trim();
-          const isAct = s === 'active' || s === 'actif' || s === '';
-          const isNotTr = p !== 'trial' && p !== 'essai' && p !== 'free' && p !== '';
           const amt = Number(b.last_payment_amount) || 0;
-          return (isNotTr && isAct) || p === 'pro' || p.includes('pro') || amt >= 50000;
+          if (p.includes('populaire') || p.includes('16500') || p.includes('prolonge')) return false;
+          return p === 'pro' || p.startsWith('pro_') || (p.includes('pro') && !p.includes('prolonge')) || amt >= 50000;
         });
         if (found) {
           patron.isProActive = true;
@@ -150,19 +158,22 @@ export async function getTotalArticleCount(ownerOrMainStoreId: string): Promise<
 
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       const orClause = `patron_id.eq.${ownerOrMainStoreId},${storeIds.map((id) => `boutique_id.eq.${id}`).join(',')}`;
-      const { count, error } = await supabase
+      const { data: rows, error } = await supabase
         .from('produits')
-        .select('id', { count: 'exact', head: true })
+        .select('id, status, is_deleted')
         .or(orClause);
 
-      if (!error && count !== null) {
-        return count;
+      if (!error && Array.isArray(rows)) {
+        return rows.filter((p: any) => p.status !== 'deleted' && p.is_deleted !== true).length;
       }
     }
 
     const allProducts = await db.produits.toArray();
-    const count = allProducts.filter((p) =>
-      storeIds.includes(p.boutique_id || '') || storeIds.includes(p.patron_id)
+    const count = allProducts.filter(
+      (p) =>
+        p.status !== 'deleted' &&
+        p.is_deleted !== true &&
+        (storeIds.includes(p.boutique_id || '') || storeIds.includes(p.patron_id))
     ).length;
     return count;
   } catch (err) {
@@ -172,12 +183,47 @@ export async function getTotalArticleCount(ownerOrMainStoreId: string): Promise<
 }
 
 /**
- * Vérifie si on peut ajouter un article pour Pro (<= 300 au total)
+ * Vérifie si on peut ajouter un article pour Pro (<= 300 actifs dans la boutique active)
  */
 export async function canAddArticlePro(
-  ownerOrMainStoreId: string
+  activeBoutiqueId: string
 ): Promise<{ allowed: boolean; currentTotal: number; max: number; message?: string }> {
-  const currentTotal = await getTotalArticleCount(ownerOrMainStoreId);
+  let currentTotal = 0;
+  const isSub = activeBoutiqueId.startsWith('btq_sub_');
+  const allProducts = await db.produits.toArray();
+  const localActive = allProducts.filter(
+    (p) =>
+      p.status !== 'deleted' &&
+      p.is_deleted !== true &&
+      (isSub
+        ? p.boutique_id === activeBoutiqueId
+        : p.boutique_id
+        ? p.boutique_id === activeBoutiqueId
+        : p.patron_id === activeBoutiqueId)
+  );
+  currentTotal = localActive.length;
+
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      const orClause = isSub
+        ? `boutique_id.eq.${activeBoutiqueId}`
+        : `boutique_id.eq.${activeBoutiqueId},and(boutique_id.is.null,patron_id.eq.${activeBoutiqueId})`;
+      const { data: rows, error } = await supabase
+        .from('produits')
+        .select('id, status, is_deleted')
+        .or(orClause);
+      if (!error && Array.isArray(rows)) {
+        const ids = new Set(
+          rows.filter((r: any) => r.status !== 'deleted' && r.is_deleted !== true).map((r: any) => r.id)
+        );
+        for (const lp of localActive) {
+          if (lp.synced === false) ids.add(lp.id);
+        }
+        currentTotal = ids.size;
+      }
+    } catch {}
+  }
+
   const allowed = currentTotal < PRO_MAX_ARTICLES;
 
   return {
@@ -186,12 +232,12 @@ export async function canAddArticlePro(
     max: PRO_MAX_ARTICLES,
     message: allowed
       ? undefined
-      : `Limite Pro atteinte : ${PRO_MAX_ARTICLES} articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.`,
+      : `Limite Pro atteinte : ${PRO_MAX_ARTICLES} articles max dans cette boutique.`,
   };
 }
 
 /**
- * Calcule le total d'employés toutes boutiques réunies (<= 10)
+ * Calcule le total d'employés actifs toutes boutiques réunies (<= 10)
  */
 export async function getTotalEmployeeCount(ownerOrMainStoreId: string): Promise<number> {
   try {
@@ -200,13 +246,13 @@ export async function getTotalEmployeeCount(ownerOrMainStoreId: string): Promise
 
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       const orClause = `patron_id.eq.${ownerOrMainStoreId},${storeIds.map((id) => `boutique_id.eq.${id}`).join(',')}`;
-      const { count, error } = await supabase
+      const { data: rows, error } = await supabase
         .from('employes')
-        .select('id', { count: 'exact', head: true })
+        .select('id, status, is_deleted')
         .or(orClause);
 
-      if (!error && count !== null) {
-        return count;
+      if (!error && Array.isArray(rows)) {
+        return rows.filter((e: any) => e.status !== 'deleted' && e.is_deleted !== true).length;
       }
     }
 
@@ -289,13 +335,13 @@ export async function createSubBoutique({
         whatsapp_number: (mainPatron as any).whatsapp_number || mainPatron.telephone || '',
         whatsapp: (mainPatron as any).whatsapp || (mainPatron as any).whatsapp_number || mainPatron.telephone || '',
         pin_code: mainPatron.pin_code || mainPatron.code_pin || '',
-        referral_code: (mainPatron as any).referral_code || null,
-        referred_by_code: (mainPatron as any).referred_by_code || (mainPatron as any).referred_by || null,
-        referred_by: (mainPatron as any).referred_by || (mainPatron as any).referred_by_code || null,
+        referral_code: null,
+        referred_by_code: null,
+        referred_by: null,
         plan: 'pro', // Hérite strictement du plan PRO
         status: 'active',
         is_active: true,
-        has_paid_annuel: isAnnual, // Hérite du statut annuel
+        has_paid_annuel: false, // Jamais déclencher parrainage sur boutique secondaire
         subscription_end_date: subSubEnd, // Même date d'expiration
         subscription_end: subSubEnd, // Même date d'expiration
         last_payment_amount: 0,
@@ -321,6 +367,8 @@ export async function createSubBoutique({
           code_pin: mainPatron.pin_code || mainPatron.code_pin,
           telephone: mainPatron.telephone || '',
           subscription_status: 'pro',
+          referred_by: null,
+          date_inscription: mainPatron.date_inscription || mainPatron.created_at || nowIso,
           is_active: true,
           created_at: nowIso,
         } as any, { onConflict: 'id' });

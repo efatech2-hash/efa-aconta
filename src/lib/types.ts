@@ -24,6 +24,7 @@ export interface Patron {
   code_pin?: string; // code PIN / mot de passe colonne Supabase
   mot_de_passe?: string; // mot de passe synchro
   photo_url?: string;
+  photo_profil?: string;
   photo_devanture?: string;
   adresse?: string;
   genre: Genre;
@@ -39,6 +40,7 @@ export interface Patron {
   statut?: string;
   email?: string;
   referral_code?: string; // code unique ex: EFA-X7Y2Z
+  code_parrainage?: string; // colonne SQL patrons.code_parrainage
   referred_by?: string | null; // code du parrain
   referral_bonus_given?: boolean; // bonus donné 1 seule fois par filleul
   has_paid_annuel?: boolean; // si filleul a payé 1 an
@@ -55,6 +57,7 @@ export interface Patron {
   isSubOfPro?: boolean; // Boutique 2 ou 3 rattachée à un compte PRO
   subBadgeText?: string; // "PRO - Incluse dans Principale"
   solde?: number; // Solde net caisse persistant Supabase
+  date_inscription?: string; // Date d'inscription du patron principal (calcul 21 jours essai)
   created_at: string;
 }
 
@@ -104,6 +107,9 @@ export interface Produit {
   seuil_alerte: number; // Correction 2: seuil alerte stock bas ajustable, default 5
   categorie?: string; // Correction 5: catégorie article
   is_exemple?: boolean; // Marqueur pour produits de démonstration
+  status?: 'active' | 'deleted' | string;
+  is_deleted?: boolean;
+  synced?: boolean;
   created_at: string;
 }
 
@@ -129,6 +135,7 @@ export interface Vente {
   est_credit: boolean;
   reste_a_payer: number;
   vendu_par_id: string;
+  employee_id?: string | null;
   vendu_par_nom: string;
   vendu_par_genre?: Genre;
   date: string;

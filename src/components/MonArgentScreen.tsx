@@ -30,6 +30,8 @@ import {
   resolveMainPatronId,
   buildCreditSupabasePayload,
   buildDepenseSupabasePayload,
+  safeSupabaseWrite,
+  computeCreditSalePaidAmount,
 } from '../lib/supabaseHelper';
 import { getMainStoreId } from '../lib/mesBoutiques';
 
@@ -848,33 +850,88 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         await db.ventes.delete(vente.id);
       }
 
-      // 4. Si crédit associé, le supprimer ou déduire dans Supabase & local (isolé par boutique_id)
+      // 4. Si crédit associé, supprimer SEULEMENT cette ligne-là (id + boutique_id), JAMAIS par patron_id ou client_nom seul
       const currentBtqId = getActiveBoutiqueId(patron);
       const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
 
-      if (vente.est_credit && (vente.ticket_id || vente.id || vente.client_nom)) {
+      let matchedCredit: any = null;
+      if (vente.est_credit) {
+        const activeCreditsPool = [
+          ...(remoteCredits || []),
+          ...credits,
+        ].filter((c) => (c.boutique_id ? c.boutique_id === currentBtqId : c.patron_id === currentBtqId));
+
+        matchedCredit =
+          activeCreditsPool.find((c) => c.id === vente.id) ||
+          (vente.ticket_id ? activeCreditsPool.find((c) => c.id === vente.ticket_id) : undefined) ||
+          activeCreditsPool.find(
+            (c) => c.sale_id && (c.sale_id === vente.id || (vente.ticket_id && c.sale_id === vente.ticket_id))
+          ) ||
+          null;
+
+        if (!matchedCredit && typeof navigator !== 'undefined' && navigator.onLine) {
+          try {
+            const { data: byVenteId } = await supabase
+              .from('credits')
+              .select('id, boutique_id, patron_id, client_nom, montant_total, montant_paye, reste_a_payer')
+              .eq('id', vente.id)
+              .eq('boutique_id', currentBtqId)
+              .maybeSingle();
+
+            if (byVenteId) {
+              matchedCredit = byVenteId;
+            } else if (vente.ticket_id && vente.ticket_id !== vente.id) {
+              const { data: byTicketId } = await supabase
+                .from('credits')
+                .select('id, boutique_id, patron_id, client_nom, montant_total, montant_paye, reste_a_payer')
+                .eq('id', vente.ticket_id)
+                .eq('boutique_id', currentBtqId)
+                .maybeSingle();
+              if (byTicketId) matchedCredit = byTicketId;
+            }
+
+            if (!matchedCredit && vente.client_nom) {
+              const { data: legacyCandidate } = await supabase
+                .from('credits')
+                .select('id, boutique_id, patron_id, client_nom, montant_total, montant_paye, reste_a_payer')
+                .eq('boutique_id', currentBtqId)
+                .eq('client_nom', vente.client_nom)
+                .eq('montant_total', vente.montant_total || 0)
+                .limit(1)
+                .maybeSingle();
+              if (legacyCandidate) matchedCredit = legacyCandidate;
+            }
+          } catch (credLookupErr) {
+            console.warn('[MonArgent] Note recherche crédit de la vente:', credLookupErr);
+          }
+        }
+
+        const targetCreditId = matchedCredit?.id || vente.id;
+
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
             await supabase
               .from('credits')
               .delete()
-              .eq('boutique_id', currentBtqId)
-              .eq('client_nom', vente.client_nom || 'Sans nom');
-          } catch {}
+              .eq('id', targetCreditId)
+              .eq('boutique_id', currentBtqId);
+          } catch (delCredErr) {
+            console.warn('[MonArgent] Erreur DELETE credit ciblé:', delCredErr);
+            await queueSyncItem('credits', 'delete', targetCreditId, { boutique_id: currentBtqId });
+          }
+        } else {
+          await queueSyncItem('credits', 'delete', targetCreditId, { boutique_id: currentBtqId });
         }
-        const clientCredits = credits.filter(
-          (c) =>
-            (c.boutique_id ? c.boutique_id === currentBtqId : c.patron_id === currentBtqId) &&
-            ((c.sale_id && (c.sale_id === vente.ticket_id || c.sale_id === vente.id)) || c.client_nom === vente.client_nom)
-        );
-        for (const c of clientCredits) {
-          await db.credits.delete(c.id);
+
+        await db.credits.delete(targetCreditId).catch(() => {});
+        if (remoteCredits) {
+          setRemoteCredits((prev) => (prev ? prev.filter((c) => c.id !== targetCreditId) : prev));
         }
       }
 
-      // 5. Décrémentation DIRECTE du solde caisse dans Supabase (somme payée de la vente annulée)
+      // 5. Décrémentation DIRECTE du solde caisse dans Supabase (SEULEMENT montant_paye de cette vente pour un crédit)
       const montantRembourse = vente.est_credit
-        ? Math.max(0, (vente.montant_total || 0) - (vente.reste_a_payer || 0))
+        ? computeCreditSalePaidAmount(vente, matchedCredit)
         : (vente.montant_total || 0);
 
       if (montantRembourse > 0) {
@@ -909,7 +966,12 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         } catch {}
       }
 
-      // 6. Logger dans logsSuppression et historique_actions
+      // 6. Logger dans logs_suppression (avec client_nom) et historique_actions
+      const resolvedClientNom =
+        vente.client_nom ||
+        matchedCredit?.client_nom ||
+        (vente.est_credit ? 'Sans nom' : 'Client comptant');
+
       const logEntry: LogSuppression = {
         id: generatePrefixedId('log'),
         patron_id: resolvedMainId,
@@ -918,14 +980,27 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         produit_nom: vente.produit_nom,
         qte: vente.qte,
         montant: vente.montant_total,
-        client_nom: vente.client_nom || 'Client comptant',
+        client_nom: resolvedClientNom,
         raison: 'Annulation erreur de saisie',
         supprime_par: currentUser.nom,
         date: nowIso,
       };
 
       await db.logsSuppression.put(logEntry);
-      await queueSyncItem('logs_suppression', 'insert', logEntry.id, logEntry);
+      const logSupabasePayload = {
+        ...logEntry,
+        boutique_id: currentBtqId,
+      };
+      let logOnlineSaved = false;
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+          const { error: logErr } = await safeSupabaseWrite('logs_suppression', 'upsert', logSupabasePayload);
+          if (!logErr) logOnlineSaved = true;
+        } catch {}
+      }
+      if (!logOnlineSaved) {
+        await queueSyncItem('logs_suppression', 'insert', logEntry.id, logSupabasePayload);
+      }
 
       await logAction({
         patron_id: resolvedMainId,

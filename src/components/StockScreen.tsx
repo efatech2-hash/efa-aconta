@@ -26,17 +26,14 @@ import { logAction } from '../lib/historique';
 import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites } from '../lib/checkLimits';
 import {
   isProActive,
-  isPatronGloballyPro,
   getMainStoreId,
-  getTotalArticleCount,
-  canAddArticlePro,
-  PRO_MAX_ARTICLES,
 } from '../lib/mesBoutiques';
 import { BoutonRetour } from './BoutonRetour';
 import { deleteProductWithStorageCleanup } from '../lib/productDelete';
-import { checkProductQuota, uploadProductImage, PLAN_LIMITS } from '../lib/productStorage';
+import { checkProductQuota, uploadProductImage } from '../lib/productStorage';
 import { normalizePlanForCompression, type ProductPlan } from '../lib/productCompressor';
 import { supabase } from '../lib/supabase';
+import { upsertProduitSafely } from '../lib/supabaseHelper';
 import {
   takePhotoFromCamera,
   pickPhotoFromGallery,
@@ -90,26 +87,15 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  // LOGIQUE DES 300 ARTICLES PARTAGÉS (PRO) & QUOTA STOCKAGE
+  // COMPTE STRICT : Produits actifs de la boutique actuelle uniquement (pas les supprimés, pas les autres boutiques)
   const isPro = isProActive(patron);
   const mainStoreId = getMainStoreId(patron);
-  const [totalArticlesPro, setTotalArticlesPro] = useState<number>(products.length);
   const userPlan: ProductPlan = normalizePlanForCompression(patron.subscription_status);
-  const maxArticlesPlan = isPro ? 300 : PLAN_LIMITS[userPlan] || 7;
-  const currentTotalArticles = isPro ? totalArticlesPro : products.length;
+  const currentLimites = getLimites(isPro ? 'pro' : (patron.subscription_status || 'essai'));
+  const maxArticlesPlan = currentLimites.maxArticles;
+  const activeProducts = products.filter((p) => p.status !== 'deleted' && !p.is_deleted);
+  const currentTotalArticles = activeProducts.length;
   const quotaPercent = Math.min(100, Math.round((currentTotalArticles / maxArticlesPlan) * 100));
-
-  React.useEffect(() => {
-    isPatronGloballyPro(patron).then((isPro) => {
-      if (isPro) {
-        getTotalArticleCount(mainStoreId).then((cnt) => {
-          setTotalArticlesPro(cnt);
-        });
-      } else {
-        setTotalArticlesPro(products.length);
-      }
-    });
-  }, [patron, products, mainStoreId]);
 
   // Chargement direct des produits depuis Supabase pour cette boutique
   React.useEffect(() => {
@@ -122,20 +108,25 @@ export const StockScreen: React.FC<StockScreenProps> = ({
           .order('created_at', { ascending: false });
 
         if (!error && data) {
-          await db.produits.where('patron_id').equals(patron.id).delete();
-          const fresh = data.map((p) => ({
-            id: p.id,
-            boutique_id: patron.id,
-            patron_id: patron.id,
-            nom: p.nom,
-            prix_achat: Number(p.prix_achat) || 0,
-            prix_vente: Number(p.prix_vente) || 0,
-            stock_qte: Number(p.stock_qte) || 0,
-            seuil_alerte: Number(p.seuil_alerte) ?? 5,
-            categorie: p.categorie || 'Général',
-            photo_url: p.photo_url || '',
-            created_at: p.created_at || new Date().toISOString(),
-          }));
+          await db.produits.where('boutique_id').equals(patron.id).delete().catch(() => {});
+          const fresh = data
+            .filter((p: any) => p.status !== 'deleted' && p.is_deleted !== true)
+            .map((p: any) => ({
+              id: p.id,
+              boutique_id: patron.id,
+              patron_id: p.patron_id || mainStoreId || patron.id,
+              nom: p.nom,
+              prix_achat: Number(p.prix_achat) || 0,
+              prix_vente: Number(p.prix_vente) || 0,
+              stock_qte: Number(p.stock_qte) || 0,
+              seuil_alerte: Number(p.seuil_alerte) ?? 5,
+              categorie: p.categorie || 'Général',
+              photo_url: p.photo_url || '',
+              status: p.status || 'active',
+              is_deleted: Boolean(p.is_deleted),
+              synced: true,
+              created_at: p.created_at || new Date().toISOString(),
+            }));
           if (fresh.length > 0) {
             await db.produits.bulkPut(fresh);
           }
@@ -150,13 +141,13 @@ export const StockScreen: React.FC<StockScreenProps> = ({
     }
   }, [patron.id]);
 
-  // Séparation stock bas et stock normal
-  const stockBasProducts = products.filter((p) => {
+  // Séparation stock bas et stock normal (produits actifs uniquement)
+  const stockBasProducts = activeProducts.filter((p) => {
     const seuil = p.seuil_alerte ?? 5;
     return p.stock_qte <= seuil;
   });
 
-  const stockNormalProducts = products.filter((p) => {
+  const stockNormalProducts = activeProducts.filter((p) => {
     const seuil = p.seuil_alerte ?? 5;
     return p.stock_qte > seuil;
   });
@@ -356,7 +347,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const handleConfirmDelete = async () => {
     if (!productToDelete) return;
     try {
-      // 1. Suppression préalable de l'image dans Supabase Storage 'efa-aconta-produits' puis DB
+      // 1. Suppression préalable de l'image dans Supabase Storage 'efa-photos' puis DB
       await deleteProductWithStorageCleanup({
         userId: patron.id,
         produitId: productToDelete.id,
@@ -405,22 +396,20 @@ export const StockScreen: React.FC<StockScreenProps> = ({
       const prodId = 'prod-' + Date.now();
       let finalPhoto = newPhotoUrl || '';
 
-      // 2. D'ABORD uploader le vrai fichier dans le bucket 'efa-aconta-produits'
+      // 2. D'ABORD uploader le vrai fichier dans le bucket 'efa-photos'
       if (newPhotoUrl) {
         try {
           const uploaded = await uploadProductImage(newPhotoUrl, patron.id, prodId, userPlan);
           if (uploaded) finalPhoto = uploaded;
         } catch (uploadErr) {
-          console.error('[StockScreen] Échec upload image, création produit annulée:', uploadErr);
-          setIsSaving(false);
-          return; // NE PAS créer le produit si l'upload échoue !
+          console.warn('[StockScreen] Note upload image, fallback photo locale:', uploadErr);
         }
       }
 
       const newProd: Produit = {
         id: prodId,
         boutique_id: patron.id,
-        patron_id: patron.id,
+        patron_id: mainStoreId || patron.id,
         nom: newNom.trim(),
         categorie: newCategorie.trim() || 'Général',
         prix_vente: numVente,
@@ -431,42 +420,34 @@ export const StockScreen: React.FC<StockScreenProps> = ({
         created_at: new Date().toISOString(),
       };
 
-      // 1. Enregistrement obligatoire sur Supabase (bloque si échec)
+      // 1. Vérifier que patron_id existe dans `patrons` (sinon utilise patron actuel) + upsert `produits` & `aconta_produits`
       if (typeof navigator !== 'undefined' && navigator.onLine) {
-        const { error: insertErr } = await supabase.from('produits').insert([{
-          id: prodId,
-          boutique_id: patron.id,
-          patron_id: mainStoreId || patron.id,
-          nom: newProd.nom,
-          categorie: newProd.categorie,
-          prix_vente: newProd.prix_vente,
-          prix_achat: newProd.prix_achat,
-          stock_qte: newProd.stock_qte,
-          seuil_alerte: newProd.seuil_alerte,
-          photo_url: finalPhoto,
-          created_at: newProd.created_at,
-        }]);
-
-        if (insertErr) {
-          console.error('[StockScreen] Erreur Supabase:', insertErr);
-          alert(`Erreur Supabase: ${insertErr.message}`);
-          setIsSaving(false);
-          return;
-        }
-
-        try {
-          await supabase.from('aconta_produits').upsert([{
+        const { error: insertErr, resolvedPatronId } = await upsertProduitSafely(
+          {
             id: prodId,
-            user_id: patron.id,
+            boutique_id: patron.id,
+            patron_id: mainStoreId || patron.id,
             nom: newProd.nom,
             categorie: newProd.categorie,
             prix_vente: newProd.prix_vente,
             prix_achat: newProd.prix_achat,
             stock_qte: newProd.stock_qte,
-            photo_url: newProd.photo_url,
+            seuil_alerte: newProd.seuil_alerte,
+            photo_url: finalPhoto,
             created_at: newProd.created_at,
-          }]);
-        } catch {}
+          },
+          patron
+        );
+        newProd.patron_id = resolvedPatronId || patron.id;
+
+        if (insertErr) {
+          console.error('[StockScreen] Erreur Supabase:', insertErr);
+          if (String(insertErr?.code || '') !== '23503') {
+            alert(`Erreur Supabase: ${insertErr.message}`);
+            setIsSaving(false);
+            return;
+          }
+        }
       }
 
       // 2. Cache local Dexie
@@ -653,15 +634,15 @@ export const StockScreen: React.FC<StockScreenProps> = ({
             Inventaire Boutique
           </span>
           <h3 className="text-2xl sm:text-3xl font-black">
-            {products.length} Articles en catalogue
+            {currentTotalArticles} Articles en catalogue
           </h3>
 
-          {/* QUOTA UTILISÉ AVEC BARRE DE PROGRESSION (Anti-saturation Stockage) */}
+          {/* QUOTA UTILISÉ AVEC BARRE DE PROGRESSION */}
           <div className="mt-3 space-y-2 w-full max-w-sm">
             <div className="flex items-center justify-between text-xs font-black">
               <span className="flex items-center gap-1.5 text-emerald-100">
                 <Package className="w-3.5 h-3.5 text-amber-300" />
-                <span>{currentTotalArticles} / {maxArticlesPlan} produits utilisés</span>
+                <span>{currentTotalArticles} / {maxArticlesPlan} produits actifs</span>
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
@@ -690,12 +671,12 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               />
             </div>
 
-            {/* Si 100% utilisé, bouton "Augmenter mon plan" */}
+            {/* Si limite atteinte (100%), bouton "Augmenter mon plan" */}
             {quotaPercent >= 100 && (
               <div className="pt-1 flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => onOpenSubscriptionModal?.(userPlan === 'gratuit' ? 'populaire' : 'pro', 'Limite de produits atteinte')}
+                  onClick={() => onOpenSubscriptionModal?.(currentLimites.plan === 'essai' ? 'populaire' : 'pro', 'Limite de produits atteinte')}
                   className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs inline-flex items-center gap-1.5 shadow-md active:scale-95 transition cursor-pointer"
                 >
                   <Sparkles className="w-3.5 h-3.5 fill-amber-600" />
@@ -703,42 +684,30 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                 </button>
               </div>
             )}
-
-            {isPro && (
-              <p className="text-[11px] font-bold text-emerald-100">
-                Quota partagé sur toutes tes boutiques réunies.
-              </p>
-            )}
           </div>
         </div>
 
         <button
           type="button"
           onClick={async () => {
-            if (isPro) {
-              const check = await canAddArticlePro(mainStoreId);
-              if (!check.allowed) {
-                alert("Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.");
-                return;
-              }
-              setIsAddingNew(true);
-              return;
-            }
-            if (!canAddArticle(patron, products.length)) {
+            if (!canAddArticle(patron, currentTotalArticles)) {
+              const targetPlan = currentLimites.plan === 'essai' ? 'populaire' : 'pro';
               if (onOpenSubscriptionModal) {
-                onOpenSubscriptionModal('populaire', `Limite d'articles atteinte (${products.length} articles)`);
+                onOpenSubscriptionModal(targetPlan, `Limite d'articles atteinte (${currentTotalArticles}/${maxArticlesPlan} articles)`);
+              } else {
+                alert(`Limite atteinte : ${maxArticlesPlan} articles max pour cette boutique.`);
               }
               return;
             }
             setIsAddingNew(true);
           }}
           className={`btn min-h-[50px] px-6 py-3 rounded-2xl font-black text-base inline-flex items-center justify-center gap-2 shadow-lg transition active:scale-95 cursor-pointer ${
-            (isPro ? totalArticlesPro < 300 : canAddArticle(patron, products.length))
+            canAddArticle(patron, currentTotalArticles)
               ? 'bg-white hover:bg-emerald-50 text-emerald-800'
               : 'bg-amber-100 hover:bg-amber-200 text-amber-950 border-2 border-amber-300 ring-2 ring-amber-400 opacity-90'
           }`}
         >
-          {(isPro ? totalArticlesPro < 300 : canAddArticle(patron, products.length)) ? (
+          {canAddArticle(patron, currentTotalArticles) ? (
             <>
               <Plus className="w-6 h-6 stroke-[3] text-emerald-600" />
               <span>+ AJOUTER UN ARTICLE</span>
@@ -748,7 +717,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               <Lock className="w-5 h-5 text-amber-700" />
               <span>+ AJOUTER ARTICLE</span>
               <span className="bg-amber-400 text-amber-950 text-[10px] px-2 py-0.5 rounded-full font-black uppercase shadow-sm">
-                PRO
+                {currentLimites.plan === 'essai' ? 'POPULAIRE' : 'PRO'}
               </span>
             </>
           )}
@@ -756,24 +725,15 @@ export const StockScreen: React.FC<StockScreenProps> = ({
       </div>
 
       {/* AFFICHAGE DU STOCK OU MESSAGE VIDE */}
-      {products.length === 0 ? (
+      {activeProducts.length === 0 ? (
         <div className="min-h-[50vh] flex flex-col items-center justify-center text-center p-6 sm:p-12 bg-emerald-50/50 border-2 border-dashed border-emerald-300 rounded-3xl my-6 space-y-4 animate-in fade-in">
           <Package className="w-16 h-16 text-emerald-400 mx-auto" />
           <button
             type="button"
-            onClick={async () => {
-              if (isPro) {
-                const check = await canAddArticlePro(mainStoreId);
-                if (!check.allowed) {
-                  alert("Limite Pro atteinte : 300 articles pour toutes tes boutiques réunies. Supprime un article ou passe en Premium.");
-                  return;
-                }
-                setIsAddingNew(true);
-                return;
-              }
-              if (!canAddArticle(patron, products.length)) {
+            onClick={() => {
+              if (!canAddArticle(patron, currentTotalArticles)) {
                 if (onOpenSubscriptionModal) {
-                  onOpenSubscriptionModal('populaire', `Limite d'articles atteinte (${products.length} articles)`);
+                  onOpenSubscriptionModal(currentLimites.plan === 'essai' ? 'populaire' : 'pro', `Limite d'articles atteinte (${currentTotalArticles}/${maxArticlesPlan} articles)`);
                 }
                 return;
               }

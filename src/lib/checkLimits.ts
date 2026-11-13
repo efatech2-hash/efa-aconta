@@ -2,6 +2,7 @@ import type { Patron, SubscriptionStatus } from './types';
 import { db } from './db';
 import { queueSyncItem } from './sync';
 import { supabase } from './supabase';
+import { getActiveBoutiqueId } from './deviceAuth';
 
 export interface PlanLimits {
   name: string;
@@ -26,23 +27,13 @@ export interface OfficialPlanLimites {
 
 /**
  * PLANS OFFICIELS EFA ACONTA - fonction unique getLimites(plan)
- * - ESSAI 0F/21j : 7 articles TOTAL, 1 vendeur, 1 appareil, 1 boutique
- * - POPULAIRE 16500F/1an : 100 TOTAL, 3 vendeurs, 3 appareils, 1 boutique
- * - PRO 50000F/6mois OU 90000F/1an = MÊME PRO : 300 TOTAL, 10 vendeurs, 5 appareils, 3 boutiques
+ * - ESSAI = 7 articles max, 1 vendeur max, 21 jours depuis date_inscription du patron, 1 boutique, pas de multi-boutique
+ * - POPULAIRE 16500 = 100 articles max, 3 vendeurs max, 3 appareils max, 1 boutique
+ * - PRO 90000 (ou 50000) = 300 articles max, 10 vendeurs max, 5 appareils max, 3 boutiques max
  */
 export function getLimites(plan?: string | null): OfficialPlanLimites {
   const p = (plan || '').toLowerCase().trim();
-  if (p === 'pro' || p.includes('pro') || p.includes('50000') || p.includes('90000') || p.includes('6mois') || p.includes('1an')) {
-    return {
-      plan: 'pro',
-      name: 'Boutique Pro (50 000 F/6 mois OU 90 000 F/1 an)',
-      maxArticles: 300,
-      maxVendeurs: 10,
-      maxAppareils: 5,
-      maxBoutiques: 3,
-    };
-  }
-  if (p === 'populaire' || p.includes('populaire') || p.includes('16500')) {
+  if (p === 'populaire' || p.includes('populaire') || p.includes('16500') || p === 'payant' || p.includes('prolonge')) {
     return {
       plan: 'populaire',
       name: 'Offre Populaire (16 500 F/1 an)',
@@ -50,6 +41,23 @@ export function getLimites(plan?: string | null): OfficialPlanLimites {
       maxVendeurs: 3,
       maxAppareils: 3,
       maxBoutiques: 1,
+    };
+  }
+  if (
+    p === 'pro' ||
+    p.includes('pro') ||
+    p.includes('50000') ||
+    p.includes('90000') ||
+    p.includes('6mois') ||
+    p === 'suite_annuel'
+  ) {
+    return {
+      plan: 'pro',
+      name: 'Boutique Pro (90 000 F/1 an)',
+      maxArticles: 300,
+      maxVendeurs: 10,
+      maxAppareils: 5,
+      maxBoutiques: 3,
     };
   }
   // ESSAI 0F/21j par défaut
@@ -122,7 +130,7 @@ export const PLAN_CONFIGS: Record<SubscriptionStatus, PlanLimits> = {
 };
 
 /**
- * Vérifie si le patron a l'offre Boutique Pro active
+ * Vérifie si le patron a l'offre Boutique Pro active (exclut Populaire!)
  */
 export function isBoutiquePro(patron?: Patron | null): boolean {
   if (!patron) return false;
@@ -130,22 +138,36 @@ export function isBoutiquePro(patron?: Patron | null): boolean {
   const plan = (patron.current_plan || '').toLowerCase();
   const forfait = (patron.forfait || '').toLowerCase();
   const statut = (patron.statut || '').toLowerCase();
+  if (
+    status.includes('populaire') ||
+    plan.includes('populaire') ||
+    forfait.includes('populaire') ||
+    status.includes('prolonge') ||
+    plan.includes('prolonge') ||
+    forfait.includes('prolonge') ||
+    forfait.includes('16500')
+  ) {
+    return false;
+  }
   return (
     status === 'pro' ||
+    status.startsWith('pro_') ||
     plan === 'pro' ||
-    forfait.includes('pro') ||
-    statut.includes('pro') ||
+    plan.startsWith('pro_') ||
+    (forfait.includes('pro') && !forfait.includes('prolonge')) ||
+    (statut.includes('pro') && !statut.includes('prolonge')) ||
     patron.isProActive === true ||
     patron.isSubOfPro === true
   );
 }
 
 /**
- * RÈGLE D'OR : Si une boutique du patron est PRO, TOUTES ses boutiques sont PRO
+ * RÈGLE D'OR : Si une boutique du patron est PRO (50 000 F ou 90 000 F), TOUTES ses boutiques sont PRO
+ * (Ne jamais confondre POPULAIRE 16500 avec PRO!)
  */
 export async function isPatronOrAnyBoutiquePro(patron?: Patron | null): Promise<boolean> {
   if (!patron) return false;
-  if (isBoutiquePro(patron) || patron.isProActive === true || patron.isSubOfPro === true) return true;
+  if (isBoutiquePro(patron)) return true;
 
   try {
     const ownerId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
@@ -159,11 +181,9 @@ export async function isPatronOrAnyBoutiquePro(patron?: Patron | null): Promise<
       if (btqs && btqs.length > 0) {
         const found = btqs.some((b) => {
           const p = (b.plan || '').toLowerCase().trim();
-          const s = (b.status || (b as any).statut || '').toLowerCase().trim();
-          const isAct = s === 'active' || s === 'actif' || s === '';
-          const isNotTr = p !== 'trial' && p !== 'essai' && p !== 'free' && p !== '';
           const amt = Number(b.last_payment_amount) || 0;
-          return (isNotTr && isAct) || p === 'pro' || p.includes('pro') || amt >= 50000;
+          if (p.includes('populaire') || p.includes('16500') || p.includes('prolonge')) return false;
+          return p === 'pro' || p.startsWith('pro_') || (p.includes('pro') && !p.includes('prolonge')) || amt >= 50000;
         });
         if (found) {
           patron.isProActive = true;
@@ -183,59 +203,78 @@ export async function isPatronOrAnyBoutiquePro(patron?: Patron | null): Promise<
  */
 export async function getEffectivePlan(patron?: Patron | null): Promise<'essai' | 'populaire' | 'pro'> {
   if (!patron) return 'essai';
+  const status = (patron.subscription_status || patron.current_plan || patron.forfait || '').toLowerCase();
+  if (status === 'populaire' || status.includes('populaire') || status.includes('16500') || status.includes('prolonge')) {
+    return 'populaire';
+  }
   const isPro = await isPatronOrAnyBoutiquePro(patron);
   if (isPro) return 'pro';
-  const status = (patron.subscription_status || patron.current_plan || '').toLowerCase();
-  if (status === 'populaire' || status.includes('populaire')) return 'populaire';
   return 'essai';
 }
 
 /**
- * BUG 1 : Calcule le total d'articles créés par patron_id (toutes ses boutiques réunies)
+ * RÈGLE STRICTE : Compte SEULEMENT les produits actifs de la boutique actuelle,
+ * pas les supprimés (status = 'deleted' ou is_deleted = true), pas les autres boutiques.
  */
-export async function getTotalProductsCountByPatron(patron: Patron): Promise<number> {
+export async function getActiveBoutiqueProductsCount(patron: Patron): Promise<number> {
   try {
-    const ownerId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
-    let storeIds = [ownerId, patron.id];
+    const activeBoutiqueId = getActiveBoutiqueId(patron) || patron.id;
+    const isSub = activeBoutiqueId.startsWith('btq_sub_') || Boolean(patron.parentId);
+
+    const localAll = await db.produits.toArray();
+    const localActive = localAll.filter(
+      (p) =>
+        p.status !== 'deleted' &&
+        p.is_deleted !== true &&
+        (isSub
+          ? p.boutique_id === activeBoutiqueId
+          : p.boutique_id
+          ? p.boutique_id === activeBoutiqueId
+          : p.patron_id === activeBoutiqueId)
+    );
 
     if (typeof navigator !== 'undefined' && navigator.onLine) {
-      try {
-        const { data: siblingStores } = await supabase
-          .from('boutiques')
-          .select('id')
-          .or(`id.eq.${ownerId},patron_id.eq.${ownerId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`);
-        if (siblingStores && siblingStores.length > 0) {
-          storeIds = Array.from(new Set([...storeIds, ...siblingStores.map((s) => s.id)]));
-        }
-      } catch {}
+      const orFilter = isSub
+        ? `boutique_id.eq.${activeBoutiqueId}`
+        : `boutique_id.eq.${activeBoutiqueId},and(boutique_id.is.null,patron_id.eq.${activeBoutiqueId})`;
 
-      const orFilter = `patron_id.eq.${ownerId},${storeIds.map((sid) => `boutique_id.eq.${sid}`).join(',')}`;
-      const { count, error } = await supabase
+      const { data: remoteRows, error } = await supabase
         .from('produits')
-        .select('id', { count: 'exact', head: true })
+        .select('id, status, is_deleted')
         .or(orFilter);
 
-      if (!error && typeof count === 'number') {
-        const localAll = await db.produits.toArray();
-        const localCount = localAll.filter(
-          (p) => storeIds.includes(p.boutique_id || '') || storeIds.includes(p.patron_id)
-        ).length;
-        return Math.max(count, localCount);
+      if (!error && Array.isArray(remoteRows)) {
+        const remoteActiveIds = new Set(
+          remoteRows
+            .filter((r: any) => r.status !== 'deleted' && r.is_deleted !== true)
+            .map((r: any) => r.id)
+        );
+        for (const lp of localActive) {
+          if (lp.synced === false) {
+            remoteActiveIds.add(lp.id);
+          }
+        }
+        return remoteActiveIds.size;
       }
     }
 
-    const localAll = await db.produits.toArray();
-    return localAll.filter(
-      (p) => storeIds.includes(p.boutique_id || '') || storeIds.includes(p.patron_id)
-    ).length;
+    return localActive.length;
   } catch (err) {
-    console.warn('[getTotalProductsCountByPatron] Erreur:', err);
+    console.warn('[getActiveBoutiqueProductsCount] Erreur:', err);
     return 0;
   }
 }
 
 /**
- * BUG 1 : Calcule le total de vendeurs / employés par patron_id (toutes ses boutiques réunies)
+ * Alias conservé pour compatibilité : retourne désormais STRICTEMENT le nombre de produits actifs
+ * de la boutique actuelle (pas les supprimés, pas les autres boutiques).
+ */
+export async function getTotalProductsCountByPatron(patron: Patron): Promise<number> {
+  return getActiveBoutiqueProductsCount(patron);
+}
+
+/**
+ * Calcule le total de vendeurs / employés actifs (hors supprimés) par patron_id
  */
 export async function getTotalEmployesCountByPatron(patron: Patron): Promise<number> {
   try {
@@ -254,23 +293,32 @@ export async function getTotalEmployesCountByPatron(patron: Patron): Promise<num
       } catch {}
 
       const orFilter = `patron_id.eq.${ownerId},${storeIds.map((sid) => `boutique_id.eq.${sid}`).join(',')}`;
-      const { count, error } = await supabase
+      const { data: remoteEmps, error } = await supabase
         .from('employes')
-        .select('id', { count: 'exact', head: true })
+        .select('id, status, is_deleted')
         .or(orFilter);
 
-      if (!error && typeof count === 'number') {
+      if (!error && Array.isArray(remoteEmps)) {
+        const remoteActiveCount = remoteEmps.filter(
+          (e: any) => e.status !== 'deleted' && e.is_deleted !== true
+        ).length;
         const localAll = await db.employes.toArray();
         const localCount = localAll.filter(
-          (e) => e.status !== 'deleted' && (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
+          (e) =>
+            e.status !== 'deleted' &&
+            e.is_deleted !== true &&
+            (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
         ).length;
-        return Math.max(count, localCount);
+        return Math.max(remoteActiveCount, localCount);
       }
     }
 
     const localAll = await db.employes.toArray();
     return localAll.filter(
-      (e) => e.status !== 'deleted' && (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
+      (e) =>
+        e.status !== 'deleted' &&
+        e.is_deleted !== true &&
+        (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
     ).length;
   } catch (err) {
     console.warn('[getTotalEmployesCountByPatron] Erreur:', err);
@@ -279,8 +327,11 @@ export async function getTotalEmployesCountByPatron(patron: Patron): Promise<num
 }
 
 /**
- * VÉRIFICATION ASYNCHRONE DU QUOTA PRODUIT TOTAL PAR PATRON_ID
- * Ex: Essai si totalProduits >= 7 bloque l'ajout du 8e article !
+ * VÉRIFICATION ASYNCHRONE DU QUOTA PRODUITS DE LA BOUTIQUE ACTIVE
+ * Bloque SEULEMENT quand on DÉPASSE :
+ * - Essai : 1er au 7ème passent sans avertissement (`currentCount < 7`), bloque au 8ème (`currentCount >= 7`)
+ * - Populaire : 1er au 100ème passent sans avertissement (`currentCount < 100`), bloque au 101ème (`currentCount >= 100`)
+ * - Pro : 1er au 300ème passent (`currentCount < 300`), bloque au 301ème (`currentCount >= 300`)
  */
 export async function checkCanAddProduct(patron: Patron): Promise<{
   allowed: boolean;
@@ -291,17 +342,17 @@ export async function checkCanAddProduct(patron: Patron): Promise<{
 }> {
   const plan = await getEffectivePlan(patron);
   const limites = getLimites(plan);
-  const currentCount = await getTotalProductsCountByPatron(patron);
+  const currentCount = await getActiveBoutiqueProductsCount(patron);
   const allowed = currentCount < limites.maxArticles;
 
   let message: string | undefined;
   if (!allowed) {
     if (plan === 'essai') {
-      message = `Limite Essai atteinte : ${limites.maxArticles} articles TOTAL autorisés (actuellement ${currentCount}/${limites.maxArticles}). Passez à Populaire (100) ou Pro (300) pour en ajouter d'autres.`;
+      message = `Limite Essai atteinte : ${limites.maxArticles} articles max autorisés (${currentCount}/${limites.maxArticles}). Passez à Populaire (100) ou Pro (300) pour ajouter le ${limites.maxArticles + 1}ème article.`;
     } else if (plan === 'populaire') {
-      message = `Limite Populaire atteinte : ${limites.maxArticles} articles TOTAL autorisés (actuellement ${currentCount}/${limites.maxArticles}). Passez à Pro (300) pour en ajouter d'autres.`;
+      message = `Limite Populaire atteinte : ${limites.maxArticles} articles max autorisés (${currentCount}/${limites.maxArticles}). Passez à Pro (300) pour en ajouter d'autres.`;
     } else {
-      message = `Limite Pro atteinte : ${limites.maxArticles} articles TOTAL pour toutes vos boutiques réunies.`;
+      message = `Limite Pro atteinte : ${limites.maxArticles} articles max dans cette boutique.`;
     }
   }
 
@@ -333,11 +384,11 @@ export async function checkCanAddEmploye(patron: Patron): Promise<{
   let message: string | undefined;
   if (!allowed) {
     if (plan === 'essai') {
-      message = `Limite Essai atteinte : ${limites.maxVendeurs} vendeur TOTAL autorisé (actuellement ${currentCount}/${limites.maxVendeurs}). Passez à Populaire (3) ou Pro (10) pour en ajouter d'autres.`;
+      message = `Limite Essai atteinte : ${limites.maxVendeurs} vendeur max autorisé (${currentCount}/${limites.maxVendeurs}). Passez à Populaire (3) ou Pro (10) pour en ajouter d'autres.`;
     } else if (plan === 'populaire') {
-      message = `Limite Populaire atteinte : ${limites.maxVendeurs} vendeurs TOTAL autorisés (actuellement ${currentCount}/${limites.maxVendeurs}). Passez à Pro (10) pour en ajouter d'autres.`;
+      message = `Limite Populaire atteinte : ${limites.maxVendeurs} vendeurs max autorisés (${currentCount}/${limites.maxVendeurs}). Passez à Pro (10) pour en ajouter d'autres.`;
     } else {
-      message = `Limite Pro atteinte : ${limites.maxVendeurs} vendeurs TOTAL pour toutes vos boutiques réunies.`;
+      message = `Limite Pro atteinte : ${limites.maxVendeurs} vendeurs max pour toutes vos boutiques réunies.`;
     }
   }
 
@@ -364,51 +415,73 @@ export function useAbonnement(patron?: Patron | null) {
 }
 
 /**
+ * Calcule la date de fin d'essai de 21 jours STRICTEMENT depuis patrons.date_inscription
+ * (jamais depuis une boutique secondaire btq_sub_...).
+ */
+export function getTrialEndDateFromPatron(patron?: Patron | null): Date | null {
+  if (!patron) return null;
+  if (patron.date_inscription) {
+    const start = new Date(patron.date_inscription);
+    if (!isNaN(start.getTime())) {
+      return new Date(start.getTime() + 21 * 24 * 60 * 60 * 1000);
+    }
+  }
+  const isSub = patron.type === 'SUB' || Boolean(patron.parentId) || Boolean(patron.id?.startsWith('btq_sub_'));
+  if (!isSub && (patron.trial_start_date || patron.created_at)) {
+    const start = new Date(patron.trial_start_date || patron.created_at);
+    if (!isNaN(start.getTime())) {
+      return new Date(start.getTime() + 21 * 24 * 60 * 60 * 1000);
+    }
+  }
+  if (patron.trial_end_date) {
+    const end = new Date(patron.trial_end_date);
+    if (!isNaN(end.getTime())) return end;
+  }
+  return null;
+}
+
+/**
  * Calcule si le patron est actuellement en période d'essai expirée
  */
 export function isSubscriptionExpired(patron?: Patron | null): boolean {
   if (!patron) return false;
-  // Si le patron est PRO actif, il n'est JAMAIS expiré d'essai
+  // Si le patron est PRO actif
   if (isBoutiquePro(patron) || patron.isProActive === true) {
-    if (patron.subscription_end_date) {
-      const now = new Date();
-      const end = new Date(patron.subscription_end_date);
-      return now > end;
+    const paidEnd = patron.subscription_end_date || patron.fin_abonnement || patron.abonnement_expire;
+    if (paidEnd) {
+      const end = new Date(paidEnd);
+      if (!isNaN(end.getTime())) return new Date() > end;
     }
     return false;
   }
+  // Si Populaire actif
+  const status = (patron.subscription_status || patron.current_plan || patron.forfait || '').toLowerCase();
+  if (status === 'populaire' || status.includes('populaire') || status.includes('prolonge')) {
+    const paidEnd = patron.subscription_end_date || patron.fin_abonnement || patron.abonnement_expire;
+    if (paidEnd) {
+      const end = new Date(paidEnd);
+      if (!isNaN(end.getTime())) return new Date() > end;
+    }
+    return false;
+  }
+
+  // Essai gratuit : 21 jours calculés depuis patrons.date_inscription
+  const trialEnd = getTrialEndDateFromPatron(patron);
+  if (trialEnd) {
+    return new Date() > trialEnd;
+  }
+
   if (patron.subscription_status === 'expired') return true;
-
-  // Si statut 'trial', vérifier la date de fin
-  if (patron.subscription_status === 'trial' || !patron.subscription_status) {
-    if (patron.trial_end_date) {
-      const now = new Date();
-      const end = new Date(patron.trial_end_date);
-      if (now > end) {
-        return true;
-      }
-    }
-  }
-
-  // Si abonnement payant expiré
-  if (patron.subscription_end_date) {
-    const now = new Date();
-    const end = new Date(patron.subscription_end_date);
-    if (now > end && patron.subscription_status !== 'trial') {
-      return true;
-    }
-  }
-
   return false;
 }
 
 /**
- * Nombre de jours restants dans l'essai gratuit
+ * Nombre de jours restants dans l'essai gratuit (21 jours depuis patrons.date_inscription)
  */
 export function getRemainingTrialDays(patron?: Patron | null): number {
-  if (!patron || !patron.trial_end_date) return 0;
+  const end = getTrialEndDateFromPatron(patron);
+  if (!end) return 0;
   const now = new Date();
-  const end = new Date(patron.trial_end_date);
   const diffMs = end.getTime() - now.getTime();
   if (diffMs <= 0) return 0;
   return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
@@ -624,14 +697,24 @@ export async function registerCurrentDevice(patronId: string): Promise<{ success
 export async function getSubscriptionUsage(patron: Patron | null | undefined) {
   if (!patron) return null;
 
-  const plan: SubscriptionStatus = patron.subscription_status || 'trial';
+  const effPlan = await getEffectivePlan(patron);
+  const isExpired = isSubscriptionExpired(patron);
+  const plan: SubscriptionStatus = isExpired
+    ? 'expired'
+    : effPlan === 'pro'
+    ? 'pro'
+    : effPlan === 'populaire'
+    ? 'populaire'
+    : (patron.subscription_status || 'trial');
   const config = PLAN_CONFIGS[plan] || PLAN_CONFIGS.trial;
+  const limites = getLimites(effPlan);
+  const mainStoreId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
 
   const [articlesCount, employesCount, appareilsCount, boutiquesCount] = await Promise.all([
-    db.produits.where('patron_id').equals(patron.id).count(),
-    db.employes.where('patron_id').equals(patron.id).and((e) => e.status !== 'deleted').count(),
-    db.appareils.where('patron_id').equals(patron.id).count(),
-    db.boutiques.where('patron_id').equals(patron.id).count(),
+    getActiveBoutiqueProductsCount(patron),
+    getTotalEmployesCountByPatron(patron),
+    db.appareils.where('patron_id').equals(mainStoreId).count(),
+    db.boutiques.where('patron_id').equals(mainStoreId).count(),
   ]);
 
   const activeBoutiques = Math.max(1, boutiquesCount);
@@ -640,31 +723,31 @@ export async function getSubscriptionUsage(patron: Patron | null | undefined) {
   return {
     plan,
     planName: config.name,
-    expiresAt: patron.subscription_end_date || patron.trial_end_date,
+    expiresAt: patron.subscription_end_date || getTrialEndDateFromPatron(patron)?.toISOString() || patron.trial_end_date,
     isExpired: isSubscriptionExpired(patron),
     articles: {
       used: articlesCount,
-      max: config.maxArticles,
-      percent: Math.min(100, Math.round((articlesCount / Math.max(1, config.maxArticles)) * 100)),
-      isLimitReached: articlesCount >= config.maxArticles,
+      max: limites.maxArticles,
+      percent: Math.min(100, Math.round((articlesCount / Math.max(1, limites.maxArticles)) * 100)),
+      isLimitReached: articlesCount >= limites.maxArticles,
     },
     employes: {
       used: employesCount,
-      max: config.maxEmployes,
-      percent: Math.min(100, Math.round((employesCount / Math.max(1, config.maxEmployes)) * 100)),
-      isLimitReached: employesCount >= config.maxEmployes,
+      max: limites.maxVendeurs,
+      percent: Math.min(100, Math.round((employesCount / Math.max(1, limites.maxVendeurs)) * 100)),
+      isLimitReached: employesCount >= limites.maxVendeurs,
     },
     appareils: {
       used: activeAppareils,
-      max: config.maxAppareils,
-      percent: Math.min(100, Math.round((activeAppareils / Math.max(1, config.maxAppareils)) * 100)),
-      isLimitReached: activeAppareils >= config.maxAppareils,
+      max: limites.maxAppareils,
+      percent: Math.min(100, Math.round((activeAppareils / Math.max(1, limites.maxAppareils)) * 100)),
+      isLimitReached: activeAppareils >= limites.maxAppareils,
     },
     boutiques: {
       used: activeBoutiques,
-      max: config.maxBoutiques,
-      percent: Math.min(100, Math.round((activeBoutiques / Math.max(1, config.maxBoutiques)) * 100)),
-      isLimitReached: activeBoutiques >= config.maxBoutiques,
+      max: limites.maxBoutiques,
+      percent: Math.min(100, Math.round((activeBoutiques / Math.max(1, limites.maxBoutiques)) * 100)),
+      isLimitReached: activeBoutiques >= limites.maxBoutiques,
     },
     features: {
       voix_efa: plan !== 'free' && plan !== 'expired',

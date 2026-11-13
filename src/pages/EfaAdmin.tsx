@@ -6,14 +6,43 @@ import { checkAndGiveReferralBonus } from '../lib/ambassadeur';
 export async function prolongerAbonnement(patronId: string, daysToAdd: number = 30) {
   const now = new Date();
   let ancienneDateFin = now;
+  let existingRawPlan = '';
+  let existingAmt = 0;
+
   try {
-    const { data } = await supabase.from('patrons').select('fin_abonnement, subscription_end_date').eq('id', patronId).maybeSingle();
+    const { data } = await supabase
+      .from('patrons')
+      .select('fin_abonnement, subscription_end_date, plan, forfait, last_payment_amount')
+      .eq('id', patronId)
+      .maybeSingle();
     const rawEnd = data?.fin_abonnement || data?.subscription_end_date;
     if (rawEnd) {
       const d = new Date(rawEnd);
       if (!isNaN(d.getTime())) ancienneDateFin = d;
     }
+    existingRawPlan = ((data as any)?.plan || (data as any)?.forfait || '').toLowerCase().trim();
+    existingAmt = Number((data as any)?.last_payment_amount) || 0;
   } catch {}
+
+  try {
+    if (!existingRawPlan) {
+      const { data: btqData } = await supabase
+        .from('boutiques')
+        .select('plan, last_payment_amount')
+        .eq('id', patronId)
+        .maybeSingle();
+      existingRawPlan = (btqData?.plan || '').toLowerCase().trim();
+      if (!existingAmt) existingAmt = Number(btqData?.last_payment_amount) || 0;
+    }
+  } catch {}
+
+  const isExistingPro =
+    !existingRawPlan.includes('populaire') &&
+    !existingRawPlan.includes('prolonge') &&
+    !existingRawPlan.includes('16500') &&
+    (existingRawPlan === 'pro' || existingRawPlan.startsWith('pro_') || existingAmt >= 50000);
+  const preservedPlan = isExistingPro ? (existingRawPlan || 'pro') : 'populaire';
+  const preservedStatus = isExistingPro ? 'pro' : 'populaire';
 
   const baseDate = ancienneDateFin > now ? ancienneDateFin : now;
   const nouvelleDate = new Date(baseDate.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
@@ -23,13 +52,16 @@ export async function prolongerAbonnement(patronId: string, daysToAdd: number = 
   await supabase.from('patrons').update({
     fin_abonnement: nouvelleDateIso,
     statut: 'ACTIF',
-    forfait: 'PROLONGE',
+    plan: preservedPlan,
+    forfait: preservedPlan,
+    subscription_status: preservedStatus,
     subscription_end_date: nouvelleDateIso,
     abonnement_expire: nouvelleDateIso,
     is_active: true,
   } as any).eq('id', patronId);
 
   await supabase.from('boutiques').update({
+    plan: preservedPlan,
     subscription_end_date: nouvelleDateIso,
     subscription_end: nouvelleDateIso,
     status: 'active',
@@ -103,15 +135,17 @@ export async function activerPro1An(patronId: string) {
     updated_at: nowIso,
   }).eq('id', patronId);
 
-  // Règle d'or ambassadeur : vérifie et donne bonus si filleul
-  try {
-    await checkAndGiveReferralBonus({
-      id: patronId,
-      plan: 'pro_annuel',
-      last_payment_amount: 90000,
-      duration_days: 365,
-    });
-  } catch (e) {}
+  // Règle d'or ambassadeur : vérifie et donne bonus une seule fois si patron principal filleul
+  if (!patronId.startsWith('btq_sub_')) {
+    try {
+      await checkAndGiveReferralBonus({
+        id: patronId,
+        plan: 'pro_annuel',
+        last_payment_amount: 90000,
+        duration_days: 365,
+      });
+    } catch (e) {}
+  }
 
   return { plan: 'pro_annuel', fin };
 }
@@ -237,15 +271,17 @@ export async function activerPopulaire1An(patronId: string) {
     updated_at: nowIso,
   }).eq('id', patronId);
 
-  // Règle d'or ambassadeur : vérifie et donne bonus si filleul
-  try {
-    await checkAndGiveReferralBonus({
-      id: patronId,
-      plan: 'populaire',
-      last_payment_amount: 16500,
-      duration_days: 365,
-    });
-  } catch (e) {}
+  // Règle d'or ambassadeur : vérifie et donne bonus une seule fois si patron principal filleul
+  if (!patronId.startsWith('btq_sub_')) {
+    try {
+      await checkAndGiveReferralBonus({
+        id: patronId,
+        plan: 'populaire',
+        last_payment_amount: 16500,
+        duration_days: 365,
+      });
+    } catch (e) {}
+  }
 
   return { plan: 'populaire', fin };
 }

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Crown, Sparkles, X, MessageCircle, Calendar, ShieldCheck, Check } from 'lucide-react';
 import type { Patron } from '../lib/types';
+import { getRemainingTrialDays, getTrialEndDateFromPatron } from '../lib/checkLimits';
 
 interface MonAbonnementModalProps {
   isOpen: boolean;
@@ -15,7 +16,7 @@ export const MonAbonnementModal: React.FC<MonAbonnementModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  // 1. FORFAIT ACTUEL : Badge "TRIAL" ou "6 MOIS (50.000F)" ou "1 AN" - récupéré depuis patron.forfait
+  // 1. FORFAIT ACTUEL : Badge "TRIAL" ou "POPULAIRE" ou "6 MOIS (50.000F)" ou "1 AN"
   const rawForfait = (
     patron.forfait ||
     patron.subscription_status ||
@@ -26,47 +27,54 @@ export const MonAbonnementModal: React.FC<MonAbonnementModalProps> = ({
   let badgeLabel = 'TRIAL';
   let badgeColor = 'bg-amber-100 text-amber-900 border-amber-300';
   let totalPeriodDays = 21;
-  let avantagesText = "7 jours d'essai, 1 boutique, support WhatsApp";
+  let avantagesText = "21 jours d'essai, 7 articles max, 1 vendeur max, 1 boutique";
+  let isTrialPlan = false;
 
-  if (rawForfait.includes('ANNUEL') || rawForfait.includes('90') || rawForfait === 'PRO' || (rawForfait.includes('1') && rawForfait.includes('AN'))) {
-    badgeLabel = '1 AN';
-    badgeColor = 'bg-blue-100 text-blue-900 border-blue-400 font-black';
-    totalPeriodDays = 365;
-    avantagesText = '12 mois complets, boutiques illimitées, appareils illimités, support 24h, tout inclus';
-  } else if (rawForfait.includes('6') || rawForfait.includes('50') || rawForfait.includes('PRO_6MOIS')) {
-    badgeLabel = '6 MOIS (50.000F)';
-    badgeColor = 'bg-purple-100 text-purple-900 border-purple-400 font-black';
-    totalPeriodDays = 180;
-    avantagesText = '6 mois complets, 2 boutiques max, 3 appareils, support prioritaire, rapports illimités';
-  } else if (rawForfait.includes('POPULAIRE') || rawForfait.includes('16500') || rawForfait.includes('16.5')) {
+  if (rawForfait.includes('POPULAIRE') || rawForfait.includes('16500') || rawForfait.includes('16.5')) {
     badgeLabel = 'POPULAIRE (16.500F)';
     badgeColor = 'bg-yellow-100 text-amber-950 border-amber-400 font-black';
     totalPeriodDays = 365;
-    avantagesText = '100 articles au catalogue, 3 vendeurs avec code PIN, 3 appareils connectés, calcul bénéfices, reçu WhatsApp';
+    avantagesText = '100 articles max, 3 vendeurs max, 3 appareils max, 1 boutique';
+  } else if (rawForfait.includes('ANNUEL') || rawForfait.includes('90') || rawForfait === 'PRO' || (rawForfait.includes('1') && rawForfait.includes('AN'))) {
+    badgeLabel = 'PRO 1 AN (90.000F)';
+    badgeColor = 'bg-blue-100 text-blue-900 border-blue-400 font-black';
+    totalPeriodDays = 365;
+    avantagesText = '300 articles max, 10 vendeurs max, 5 appareils max, 3 boutiques max';
+  } else if (rawForfait.includes('6') || rawForfait.includes('50') || rawForfait.includes('PRO_6MOIS')) {
+    badgeLabel = 'PRO 6 MOIS (50.000F)';
+    badgeColor = 'bg-purple-100 text-purple-900 border-purple-400 font-black';
+    totalPeriodDays = 180;
+    avantagesText = '300 articles max, 10 vendeurs max, 5 appareils max, 3 boutiques max';
   } else if (rawForfait.includes('PROLONGE')) {
-    badgeLabel = 'PROLONGÉ (+30J)';
+    badgeLabel = 'POPULAIRE (+30J)';
     badgeColor = 'bg-amber-100 text-amber-900 border-amber-300 font-black';
     totalPeriodDays = 30;
-    avantagesText = '30 jours complets, multi-appareils, support WhatsApp prioritaire, tout inclus';
+    avantagesText = '100 articles max, 3 vendeurs max, 3 appareils max, 1 boutique';
   } else {
-    badgeLabel = 'TRIAL';
+    isTrialPlan = true;
+    badgeLabel = 'ESSAI (21 JOURS)';
     badgeColor = 'bg-amber-100 text-amber-900 border-amber-300 font-black';
     totalPeriodDays = 21;
-    avantagesText = "7 jours d'essai, 1 boutique, support WhatsApp";
+    avantagesText = "21 jours d'essai, 7 articles max, 1 vendeur max, 1 boutique";
   }
 
-  // 2. DATE FIN ET JOURS RESTANTS
+  // 2. DATE FIN ET JOURS RESTANTS (Essai calculé depuis patrons.date_inscription)
+  const trialEndFromPatron = isTrialPlan ? getTrialEndDateFromPatron(patron) : null;
   const rawEndDate =
-    patron.fin_abonnement ||
-    patron.subscription_end_date ||
-    patron.abonnement_expire ||
-    patron.trial_end_date;
+    !isTrialPlan
+      ? (patron.fin_abonnement ||
+        patron.subscription_end_date ||
+        patron.abonnement_expire ||
+        patron.trial_end_date)
+      : (trialEndFromPatron?.toISOString() || patron.trial_end_date || patron.abonnement_expire);
 
   const now = new Date();
-  const finDate = rawEndDate ? new Date(rawEndDate) : new Date(Date.now() + 7 * 86400000);
-  const diffDays = Math.ceil((finDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  const finDate = rawEndDate ? new Date(rawEndDate) : new Date(Date.now() + 21 * 86400000);
+  const diffDays = isTrialPlan
+    ? getRemainingTrialDays(patron)
+    : Math.ceil((finDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
   const joursRestants = Math.max(0, diffDays);
-  const isExpired = diffDays < 0;
+  const isExpired = isTrialPlan ? finDate.getTime() < now.getTime() : diffDays < 0;
   const progressRatio = Math.min(100, Math.max(4, Math.round((joursRestants / totalPeriodDays) * 100)));
   const dateFinFormatted = finDate.toLocaleDateString('fr-FR');
 

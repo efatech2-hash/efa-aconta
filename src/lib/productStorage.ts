@@ -2,7 +2,7 @@
  * GESTION DU STOCKAGE SUPABASE & QUOTAS PRODUITS
  * Projet Isolé EFA ACONTA
  *
- * Bucket unique : 'efa-aconta-produits'
+ * Bucket unique : 'efa-photos'
  * Quotas :
  * - gratuit: 7 produits
  * - payant: 100 produits
@@ -13,7 +13,8 @@ import { supabase } from './supabase';
 import { db } from './db';
 import { compressProductImage, type ProductPlan, normalizePlanForCompression } from './productCompressor';
 
-export const PRODUCT_STORAGE_BUCKET = 'efa-aconta-produits';
+export const PRODUCT_STORAGE_BUCKET = 'efa-photos';
+export const PROFILE_PHOTOS_BUCKET = 'efa-photos';
 
 export const PLAN_LIMITS: Record<ProductPlan, number> = {
   gratuit: 7,
@@ -37,32 +38,47 @@ export async function checkProductQuota(
 ): Promise<QuotaCheckResult> {
   const normPlan = plan === 'pro' ? 'pro' : plan === 'payant' ? 'populaire' : 'essai';
   const limites = getLimites(normPlan);
-  let count = 0;
+  const isSub = userId.startsWith('btq_sub_');
+
+  const localAll = await db.produits.toArray();
+  const localActive = localAll.filter(
+    (p) =>
+      p.status !== 'deleted' &&
+      p.is_deleted !== true &&
+      (isSub
+        ? p.boutique_id === userId
+        : p.boutique_id
+        ? p.boutique_id === userId
+        : p.patron_id === userId)
+  );
+  let count = localActive.length;
 
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
-      // Compte sur la table officielle 'produits'
-      const { count: prodCount, error: prodErr } = await supabase
-        .from('produits')
-        .select('*', { count: 'exact', head: true })
-        .or(`patron_id.eq.${userId},boutique_id.eq.${userId}`);
+      const orFilter = isSub
+        ? `boutique_id.eq.${userId}`
+        : `boutique_id.eq.${userId},and(boutique_id.is.null,patron_id.eq.${userId})`;
 
-      if (!prodErr && typeof prodCount === 'number') {
-        count = prodCount;
+      const { data: remoteRows, error: prodErr } = await supabase
+        .from('produits')
+        .select('id, status, is_deleted')
+        .or(orFilter);
+
+      if (!prodErr && Array.isArray(remoteRows)) {
+        const remoteIds = new Set(
+          remoteRows
+            .filter((r: any) => r.status !== 'deleted' && r.is_deleted !== true)
+            .map((r: any) => r.id)
+        );
+        for (const lp of localActive) {
+          if (lp.synced === false) remoteIds.add(lp.id);
+        }
+        count = remoteIds.size;
       }
     }
   } catch (err) {
     console.warn('[checkProductQuota] Erreur query Supabase:', err);
   }
-
-  // Prise en compte du stock local Dexie (Offline-First)
-  try {
-    const localAll = await db.produits.toArray();
-    const localCount = localAll.filter(
-      (p) => p.boutique_id === userId || p.patron_id === userId
-    ).length;
-    count = Math.max(count, localCount);
-  } catch {}
 
   const maxLimit = limites.maxArticles;
   const percentage = Math.min(100, Math.round((count / maxLimit) * 100));
@@ -130,9 +146,10 @@ export async function uploadProductImage(
   if (typeof imageSource === 'string') {
     // Si c'est déjà une URL externe HTTP (ex: Unsplash) et pas un blob/data URL
     if (imageSource.startsWith('http://') || imageSource.startsWith('https://')) {
-      if (!imageSource.includes('efa-aconta-produits')) {
+      if (!imageSource.includes('efa-photos')) {
         return imageSource;
       }
+      return imageSource;
     }
 
     if (imageSource.startsWith('blob:')) {
@@ -179,18 +196,30 @@ export async function uploadProductImage(
   // 2. Chemin strict demandé : `${boutiqueId}/prod-${Date.now()}.webp`
   const filePath = `${boutiqueId}/prod-${Date.now()}.webp`;
 
-  // 3. D'ABORD uploader le vrai fichier dans le Storage
-  const { data, error } = await supabase.storage
+  // 3. D'ABORD uploader le vrai fichier dans le bucket 'efa-photos'
+  let uploadRes = await supabase.storage
     .from(PRODUCT_STORAGE_BUCKET)
     .upload(filePath, finalFile, {
       contentType: 'image/webp',
       upsert: true,
     });
 
-  if (error) {
-    console.error('[ProductStorage] Échec upload Supabase Storage:', error);
-    alert(`Erreur upload photo : ${error.message || 'Impossible d\'enregistrer l\'image'}`);
-    throw new Error(`Upload image échoué: ${error.message}`);
+  if (uploadRes.error) {
+    await ensureProfilePhotosBucket();
+    uploadRes = await supabase.storage
+      .from(PRODUCT_STORAGE_BUCKET)
+      .upload(filePath, finalFile, {
+        contentType: 'image/webp',
+        upsert: true,
+      });
+  }
+
+  if (uploadRes.error) {
+    console.error('[ProductStorage] Échec upload Supabase Storage (efa-photos):', uploadRes.error);
+    if (typeof imageSource === 'string' && imageSource.startsWith('data:')) {
+      return imageSource;
+    }
+    throw new Error(`Upload image échoué: ${uploadRes.error.message}`);
   }
 
   // 4. ENSUITE seulement, récupérer le vrai lien avec getPublicUrl()
@@ -204,4 +233,130 @@ export async function uploadProductImage(
   }
 
   return pubData.publicUrl;
+}
+
+/**
+ * Assure l'existence du bucket public 'efa-photos' pour les photos de profil patron & boutique
+ */
+export async function ensureProfilePhotosBucket(): Promise<void> {
+  try {
+    const { data: buckets } = await supabase.storage.listBuckets();
+    const exists = buckets?.some((b) => b.name === PROFILE_PHOTOS_BUCKET);
+    if (!exists) {
+      await supabase.storage.createBucket(PROFILE_PHOTOS_BUCKET, {
+        public: true,
+        fileSizeLimit: 2097152, // 2 MB max
+        allowedMimeTypes: ['image/webp', 'image/jpeg', 'image/png'],
+      });
+    }
+  } catch (err) {
+    console.warn('[Storage] Note verification bucket efa-photos:', err);
+  }
+}
+
+/**
+ * Convertit un DataURL / BlobURL / File / Blob en vrai Blob prêt pour Storage .upload()
+ */
+async function resolveImageToBlob(imageSource: File | Blob | string): Promise<Blob> {
+  if (typeof imageSource !== 'string') {
+    return imageSource;
+  }
+  if (imageSource.startsWith('blob:')) {
+    const res = await fetch(imageSource);
+    return await res.blob();
+  }
+  let b64 = imageSource;
+  let mime = 'image/jpeg';
+  if (imageSource.includes(',')) {
+    const parts = imageSource.split(',');
+    const mimeMatch = parts[0].match(/:(.*?);/);
+    if (mimeMatch) mime = mimeMatch[1];
+    b64 = parts[1];
+  }
+  const binary = atob(b64);
+  const array = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    array[i] = binary.charCodeAt(i);
+  }
+  return new Blob([array], { type: mime });
+}
+
+/**
+ * Upload d'une photo profil (patron ou boutique) dans le bucket Supabase 'efa-photos'
+ * et retour de son URL publique.
+ */
+export async function uploadProfilePhoto(
+  imageSource: File | Blob | string,
+  entityId: string,
+  kind: 'patron' | 'boutique'
+): Promise<string> {
+  if (
+    typeof imageSource === 'string' &&
+    (imageSource.startsWith('http://') || imageSource.startsWith('https://'))
+  ) {
+    return imageSource;
+  }
+
+  try {
+    const rawBlob = await resolveImageToBlob(imageSource);
+    let finalFile: File | Blob = rawBlob;
+    let contentType = rawBlob.type || 'image/jpeg';
+    let ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+
+    try {
+      const rawFile =
+        rawBlob instanceof File
+          ? rawBlob
+          : new File([rawBlob], `${kind}-${Date.now()}.${ext}`, { type: contentType });
+      finalFile = await compressProductImage(rawFile, 'pro');
+      contentType = 'image/webp';
+      ext = 'webp';
+    } catch (compErr) {
+      console.warn('[ProfilePhoto] Compression WebP ignorée, envoi original:', compErr);
+    }
+
+    const filePath = `${entityId}/${kind}-${Date.now()}.${ext}`;
+
+    let uploadRes = await supabase.storage
+      .from(PROFILE_PHOTOS_BUCKET)
+      .upload(filePath, finalFile, {
+        contentType,
+        upsert: true,
+      });
+
+    if (uploadRes.error) {
+      await ensureProfilePhotosBucket();
+      uploadRes = await supabase.storage
+        .from(PROFILE_PHOTOS_BUCKET)
+        .upload(filePath, finalFile, {
+          contentType,
+          upsert: true,
+        });
+    }
+
+    if (!uploadRes.error) {
+      const { data: pubData } = supabase.storage
+        .from(PROFILE_PHOTOS_BUCKET)
+        .getPublicUrl(filePath);
+
+      if (pubData?.publicUrl) {
+        return pubData.publicUrl;
+      }
+    }
+
+    console.warn(`[ProfilePhoto] Note upload ${PROFILE_PHOTOS_BUCKET}:`, uploadRes.error?.message || 'Fallback local actif');
+    // Fallback identique à l'employé : convertir le fichier compressé en dataUrl pour ne jamais bloquer l'UPDATE en base
+    if (typeof imageSource === 'string' && imageSource.startsWith('data:')) {
+      return imageSource;
+    }
+    return await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => resolve(typeof imageSource === 'string' ? imageSource : '');
+      reader.readAsDataURL(finalFile);
+    });
+  } catch (err) {
+    console.warn(`[ProfilePhoto] Fallback sauvegarde directe ${kind}:`, err);
+    return typeof imageSource === 'string' ? imageSource : '';
+  }
 }

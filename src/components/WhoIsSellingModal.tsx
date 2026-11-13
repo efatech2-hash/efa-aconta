@@ -224,16 +224,16 @@ export const WhoIsSellingModal: React.FC<WhoIsSellingModalProps> = ({
                     nom: patron.nom,
                     role: 'patron',
                     genre: patron.genre,
-                    photo_url: patron.photo_url,
+                    photo_url: patron.photo_url || patron.photo_profil,
                     pin_hash: patron.pin_hash,
                   })
                 }
                 className="p-5 rounded-2xl bg-amber-50 hover:bg-amber-100 border-4 border-amber-400 flex flex-col items-center justify-center transition-all transform active:scale-95 shadow-md"
               >
                 <div className="relative mb-2">
-                  {patron.photo_url ? (
+                  {(patron.photo_url || patron.photo_profil) ? (
                     <img
-                      src={patron.photo_url}
+                      src={patron.photo_url || patron.photo_profil}
                       alt={patron.nom}
                       className="w-20 h-20 rounded-full object-cover border-2 border-amber-500 shadow"
                     />
@@ -321,9 +321,17 @@ export const WhoIsSellingModal: React.FC<WhoIsSellingModalProps> = ({
           <div className="space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <div className="flex items-center gap-2 text-left">
-                <div className="w-10 h-10 rounded-full bg-[#6C5CE7] text-white flex items-center justify-center font-bold">
-                  {selectedCandidate.nom.charAt(0).toUpperCase()}
-                </div>
+                {selectedCandidate.photo_url ? (
+                  <img
+                    src={selectedCandidate.photo_url}
+                    alt={selectedCandidate.nom}
+                    className="w-11 h-11 rounded-full object-cover border-2 border-[#6C5CE7] shadow-xs"
+                  />
+                ) : (
+                  <div className="w-11 h-11 rounded-full bg-[#6C5CE7] text-white flex items-center justify-center font-bold">
+                    {selectedCandidate.nom.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <div>
                   <h4 className="text-lg font-black text-gray-900">{selectedCandidate.nom}</h4>
                   <p className="text-xs font-bold text-gray-500">Tape ton code PIN à 4 chiffres</p>

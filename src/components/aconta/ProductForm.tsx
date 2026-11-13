@@ -15,6 +15,7 @@ import { db } from '../../lib/db';
 import { queueSyncItem } from '../../lib/sync';
 import { logAction } from '../../lib/historique';
 import { supabase } from '../../lib/supabase';
+import { upsertProduitSafely } from '../../lib/supabaseHelper';
 import type { Produit, Patron } from '../../lib/types';
 
 interface ProductFormProps {
@@ -129,7 +130,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
       const produitId = 'prod-' + Date.now();
       let finalPhotoUrl = previewUrl || 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=600&q=80';
 
-      // 2. UPLOAD DANS BUCKET efa-aconta-produits EN WEBP AVEC CHEMIN ${user_id}/${produit_id}.webp
+      // 2. UPLOAD DANS BUCKET efa-photos EN WEBP
       if (selectedFile) {
         const uploadedUrl = await uploadProductImage(selectedFile, patron.id, produitId, userPlan);
         if (uploadedUrl) {
@@ -137,10 +138,11 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         }
       }
 
-      // 3. ENREGISTREMENT LOCAL & DISTANT
+      // 3. ENREGISTREMENT LOCAL & DISTANT (avec vérif patron_id anti-23503 + miroir aconta_produits)
       const newProduit: Produit = {
         id: produitId,
-        patron_id: patron.id,
+        boutique_id: patron.id,
+        patron_id: patron.patron_id || patron.parentId || patron.id,
         nom: nom.trim(),
         categorie: categorie.trim() || 'Général',
         prix_achat: numAchat,
@@ -151,25 +153,13 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         created_at: new Date().toISOString(),
       };
 
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const { resolvedPatronId } = await upsertProduitSafely(newProduit, patron);
+        newProduit.patron_id = resolvedPatronId || patron.id;
+      }
+
       await db.produits.put(newProduit);
       await queueSyncItem('produits', 'insert', produitId, newProduit);
-
-      // Synchro directe Supabase si connectée
-      try {
-        await supabase.from('aconta_produits').upsert([{
-          id: produitId,
-          user_id: patron.id,
-          nom: newProduit.nom,
-          categorie: newProduit.categorie,
-          prix_vente: newProduit.prix_vente,
-          prix_achat: newProduit.prix_achat,
-          stock_qte: newProduit.stock_qte,
-          photo_url: newProduit.photo_url,
-          created_at: newProduit.created_at,
-        }]);
-      } catch (e) {
-        // Fallback file sync
-      }
 
       logAction({
         patron_id: patron.id,
