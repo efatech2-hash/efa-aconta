@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -1186,8 +1187,21 @@ app.delete('/api/admin/boutiques/:id', requireAdminAuth, async (req: Request, re
 });
 
 // ==============================================================================
-// 5. INTÉGRATION VITE & DÉMARRAGE DU SERVEUR
+// 5. ROUTES TWA / PWA & INTÉGRATION VITE + DÉMARRAGE DU SERVEUR
 // ==============================================================================
+app.get('/.well-known/assetlinks.json', (_req: Request, res: Response) => {
+  const candidates = [
+    path.resolve(__dirname, 'public', '.well-known', 'assetlinks.json'),
+    path.resolve(__dirname, 'dist', '.well-known', 'assetlinks.json'),
+  ];
+  const filePath = candidates.find((p) => fs.existsSync(p));
+  if (!filePath) {
+    return res.status(404).json({ error: 'assetlinks.json not found' });
+  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.sendFile(filePath);
+});
+
 async function startServer() {
   const isDev = process.env.NODE_ENV !== 'production';
 
@@ -1198,7 +1212,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.use(express.static(path.resolve(__dirname, 'dist'), { dotfiles: 'allow' }));
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });

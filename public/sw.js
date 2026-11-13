@@ -1,5 +1,14 @@
-// Service Worker pour EFA ACONTA V5 (Offline-first avec Network-First garanti sans cache périmé)
-const CACHE_NAME = 'efa-aconta-v5-cache-v6';
+// Service Worker EFA Aconta (Offline shell cache sans jamais interférer avec Supabase, Auth, ni les sessions)
+const CACHE_NAME = 'efa-aconta-pwa-v7';
+const SHELL_ASSETS = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/icon-192x192.png',
+  '/icon-512x512.png',
+  '/apple-touch-icon.png',
+  '/logo.png',
+];
 
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
@@ -8,73 +17,100 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('install', (event) => {
-  // Activation immédiate sans attendre la fermeture des onglets
-  self.skipWaiting();
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) =>
+        Promise.allSettled(
+          SHELL_ASSETS.map((asset) =>
+            cache.add(new Request(asset, { cache: 'reload' })).catch(() => undefined)
+          )
+        )
+      )
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Suppression ancien cache PWA:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches
+      .keys()
+      .then((cacheNames) =>
+        Promise.all(
+          cacheNames.map((cacheName) => {
+            if (cacheName !== CACHE_NAME) {
+              return caches.delete(cacheName);
+            }
+            return Promise.resolve(false);
+          })
+        )
+      )
+      .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  const req = event.request;
+  if (req.method !== 'GET') {
+    return;
+  }
 
-  // Ne JAMAIS intercepter les requêtes de dev Vite, HMR, ou API externes
+  let url;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return;
+  }
+
+  // Ne JAMAIS intercepter Supabase (DB, Auth, Storage, Realtime), API backend, sessions, ni HMR Vite
   if (
+    url.origin !== self.location.origin ||
+    url.hostname.includes('supabase.co') ||
+    url.hostname.includes('supabase.in') ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/auth/') ||
+    url.pathname.startsWith('/rest/') ||
+    url.pathname.startsWith('/storage/') ||
+    url.pathname.startsWith('/.well-known/') ||
     url.pathname.startsWith('/@') ||
     url.pathname.includes('hot-update') ||
     url.pathname.startsWith('/src/') ||
-    url.pathname.startsWith('/api/') ||
-    url.hostname.includes('supabase.co') ||
-    url.hostname.includes('pollinations.ai') ||
-    url.hostname.includes('unsplash.com') ||
-    event.request.method !== 'GET'
+    req.headers.has('authorization')
   ) {
     return;
   }
 
-  // Pour la navigation (HTML), toujours chercher sur le réseau en direct
-  if (event.request.mode === 'navigate') {
+  // Navigation HTML : Network-First avec fallback offline sur l'app shell en cache
+  if (req.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request)
+      fetch(req)
         .then((networkResponse) => {
-          // Met à jour le cache de secours
           if (networkResponse && networkResponse.status === 200) {
             const copy = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
           }
           return networkResponse;
         })
-        .catch(() => {
-          // Secours hors-ligne uniquement si le réseau est totalement inaccessible
-          return caches.match('/index.html') || caches.match('/');
+        .catch(async () => {
+          const cachedPage = await caches.match(req);
+          if (cachedPage) return cachedPage;
+          return (await caches.match('/index.html')) || (await caches.match('/'));
         })
     );
     return;
   }
 
-  // Pour les autres ressources statiques (images, icônes) : Network first avec fallback cache
+  // Ressources statiques mêmes-origine (JS, CSS, images, icônes, manifest) : Network-First avec cache hors ligne
   event.respondWith(
-    fetch(event.request)
+    fetch(req)
       .then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
+        if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
           const copy = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
         }
         return networkResponse;
       })
-      .catch(() => caches.match(event.request))
+      .catch(() => caches.match(req))
   );
 });
 
@@ -94,4 +130,3 @@ self.addEventListener('notificationclick', (e) => {
     })
   );
 });
-

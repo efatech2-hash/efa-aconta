@@ -308,6 +308,52 @@ async function runTests() {
     'WelcomeAuthScreen must have responsive mobile+desktop layout classes'
   );
 
+  // 6. PWA INSTALLABLE + SECTION TÉLÉCHARGEMENT ACCUEIL + TWA PLAY STORE
+  const manifest = JSON.parse(fs.readFileSync('public/manifest.json', 'utf8'));
+  assert.equal(manifest.name, 'EFA Aconta');
+  assert.equal(manifest.short_name, 'EFA Aconta');
+  assert.equal(manifest.description, 'Application de gestion pour boutiques, artisans et commerçants');
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.start_url, '/');
+  assert.equal(manifest.theme_color, '#1E3A8A');
+  assert.equal(manifest.background_color, '#1E3A8A');
+
+  const iconEntries: Array<{ src: string; sizes: string; purpose?: string }> = manifest.icons || [];
+  assert.ok(iconEntries.some((i) => i.sizes === '192x192' && i.purpose === 'any'));
+  assert.ok(iconEntries.some((i) => i.sizes === '512x512' && i.purpose === 'any'));
+  assert.ok(iconEntries.some((i) => i.sizes === '192x192' && i.purpose === 'maskable'));
+  assert.ok(iconEntries.some((i) => i.sizes === '512x512' && i.purpose === 'maskable'));
+  for (const i of iconEntries) {
+    assert.ok(fs.existsSync(`public${i.src}`), `Icon file missing: public${i.src}`);
+  }
+
+  const swSrc = fs.readFileSync('public/sw.js', 'utf8');
+  assert.ok(
+    swSrc.includes('supabase.co') &&
+      swSrc.includes("'/api/'") &&
+      swSrc.includes("'/auth/'") &&
+      swSrc.includes("req.method !== 'GET'"),
+    'sw.js must never intercept Supabase, auth, API, or non-GET requests'
+  );
+
+  const assetLinks = JSON.parse(fs.readFileSync('public/.well-known/assetlinks.json', 'utf8'));
+  assert.equal(assetLinks[0]?.target?.namespace, 'android_app');
+  assert.equal(assetLinks[0]?.target?.package_name, 'com.efa.technologie.aconta');
+  assert.ok(assetLinks[0]?.relation?.includes('delegate_permission/common.handle_all_urls'));
+
+  const pwaHookSrc = fs.readFileSync('src/lib/usePWAInstall.ts', 'utf8');
+  const pwaBtnSrc = fs.readFileSync('src/components/PWAInstallButton.tsx', 'utf8');
+  assert.ok(pwaHookSrc.includes('beforeinstallprompt') && pwaHookSrc.includes('appinstalled'));
+  assert.ok(pwaBtnSrc.includes("Installer l'application") && headerSrc.includes('PWAInstallButton'));
+  assert.ok(
+    welcomeSrc.includes("Télécharger l'application EFA Aconta") &&
+      welcomeSrc.includes('Télécharger sur Google Play') &&
+      welcomeSrc.includes("Installer l'application Web") &&
+      !welcomeSrc.includes('APK direct') &&
+      !welcomeSrc.includes('.apk'),
+    'WelcomeAuthScreen must display Google Play + Web App download buttons and NEVER direct APK download'
+  );
+
   console.log('✅ ALL VERIFICATION & REGRESSION TESTS PASSED!');
 }
 

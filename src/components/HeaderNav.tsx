@@ -17,6 +17,8 @@ import type { Patron, CurrentUser } from '../lib/types';
 import { getAccord } from '../lib/accord';
 import { useVoice } from '../lib/VoiceContext';
 import { isProActive } from '../lib/mesBoutiques';
+import { usePWAInstall } from '../lib/usePWAInstall';
+import { PWAInstallButton, PWAInstallGuideModal } from './PWAInstallButton';
 
 interface HeaderNavProps {
   patron: Patron;
@@ -48,25 +50,12 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   deviceStoreName,
   onTriggerChangeDeviceStore,
 }) => {
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [isInstallable, setIsInstallable] = useState(false);
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
+  const [isInstallGuideOpen, setIsInstallGuideOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isPhotoViewerOpen, setIsPhotoViewerOpen] = useState(false);
   const { isVoiceOn, toggleVoice, speak } = useVoice();
-
-  useEffect(() => {
-    const handleBeforeInstallPrompt = (e: any) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setIsInstallable(true);
-    };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    };
-  }, []);
 
   // Fermer le menu mobile lors d'un appui sur Escape
   useEffect(() => {
@@ -91,11 +80,15 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   }, []);
 
   const handleInstallClick = async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-    if (outcome === 'accepted') {
-      setIsInstallable(false);
+    if (isInstallable) {
+      const outcome = await install();
+      if (outcome === 'unavailable' && isIOS) {
+        setIsInstallGuideOpen(true);
+      }
+      return;
+    }
+    if (isIOS) {
+      setIsInstallGuideOpen(true);
     }
   };
 
@@ -214,6 +207,9 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                   </>
                 )}
               </div>
+
+              {/* Bouton Installer l'application (Desktop + Mobile, masqué si déjà installée) */}
+              <PWAInstallButton />
 
               {/* DESKTOP XL UNIQUEMENT (>= 1280px) : Raccourcis complets */}
               <div className="hidden xl:flex items-center gap-2">
@@ -652,7 +648,7 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
             )}
 
             {/* RACCOURCI INSTALLER L'APPLICATION (PWA) */}
-            {isInstallable && (
+            {!isInstalled && (isInstallable || isIOS) && (
               <button
                 type="button"
                 onClick={() => {
@@ -770,6 +766,13 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
           </div>
         </div>
       )}
+
+      <PWAInstallGuideModal
+        isOpen={isInstallGuideOpen}
+        onClose={() => setIsInstallGuideOpen(false)}
+        isIOS={isIOS}
+        isInstalled={isInstalled}
+      />
     </>
   );
 };

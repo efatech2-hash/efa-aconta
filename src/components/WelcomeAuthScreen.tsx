@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Store, KeyRound, User, ArrowLeft, Check, ShieldCheck, Sparkles, Smartphone, Eye, EyeOff, Camera, Image as ImageIcon } from 'lucide-react';
+import { Store, KeyRound, User, ArrowLeft, Check, ShieldCheck, Sparkles, Smartphone, Eye, EyeOff, Camera, Image as ImageIcon, Download, ExternalLink } from 'lucide-react';
 import { createBoutique, loginBoutique, slugifyBoutiqueName, type EfaBoutiqueRecord } from '../lib/deviceAuth';
 import { DeviceLimitModal } from './DeviceLimitModal';
 import type { Patron } from '../lib/types';
@@ -11,6 +11,8 @@ import {
   restoreFormState,
   clearFormState,
 } from '../lib/camera';
+import { PLAY_STORE_URL, usePWAInstall } from '../lib/usePWAInstall';
+import { PWAInstallButton, PWAInstallGuideModal } from './PWAInstallButton';
 
 interface WelcomeAuthScreenProps {
   onSuccess: (patron: Patron) => void;
@@ -42,6 +44,23 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
   // État UI
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
+  const [showInstallGuideModal, setShowInstallGuideModal] = useState(false);
+
+  const handleWebAppInstallClick = async () => {
+    if (isInstalled) {
+      setShowInstallGuideModal(true);
+      return;
+    }
+    if (isInstallable) {
+      const result = await install();
+      if (result === 'unavailable') {
+        setShowInstallGuideModal(true);
+      }
+      return;
+    }
+    setShowInstallGuideModal(true);
+  };
 
   // État Modal Limite Multi-Appareils
   const [limitModalData, setLimitModalData] = useState<{
@@ -232,6 +251,13 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
 
   return (
     <div className="min-h-[100dvh] w-full overflow-x-hidden overflow-y-auto bg-gradient-to-br from-[#EEF2FF] via-[#F8FAFC] to-[#F3E8FF] flex flex-col justify-center items-center px-3 py-4 sm:px-6 sm:py-8 select-none">
+      {/* BARRE HAUTE PWA (Desktop + Mobile, masquée si déjà installée) */}
+      {!isInstalled && (isInstallable || isIOS) && (
+        <div className="w-full max-w-md lg:max-w-4xl flex items-center justify-end mb-2.5 sm:mb-3">
+          <PWAInstallButton compactOnMobile={false} />
+        </div>
+      )}
+
       <div className="w-full max-w-md lg:max-w-4xl bg-white rounded-3xl shadow-xl border-2 border-gray-100 overflow-hidden grid grid-cols-1 lg:grid-cols-12">
         {/* PANNEAU GAUCHE DESKTOP */}
         <div className="hidden lg:flex lg:col-span-5 bg-gradient-to-br from-[#1E3A8A] via-[#1D4ED8] to-[#4338CA] text-white p-8 xl:p-10 flex-col justify-between relative overflow-hidden">
@@ -365,10 +391,43 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
                 <span>J'AI DÉJÀ UN COMPTE</span>
               </button>
 
-              <div className="pt-2 sm:pt-3 text-center">
+              <div className="pt-1 text-center">
                 <p className="text-[11px] sm:text-xs text-gray-400 font-semibold leading-relaxed">
                   Connectez-vous avec seulement le nom de votre boutique et votre code PIN à 4 chiffres.
                 </p>
+              </div>
+
+              {/* SECTION TÉLÉCHARGER L'APPLICATION EFA ACONTA */}
+              <div className="mt-3 pt-4 border-t border-gray-100 space-y-2.5">
+                <div className="text-center">
+                  <p className="text-xs sm:text-sm font-black text-slate-900">
+                    Télécharger l'application EFA Aconta
+                  </p>
+                  <p className="text-[11px] text-slate-500 font-semibold mt-0.5">
+                    Utilisez EFA Aconta comme une application rapide sur mobile et ordinateur
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <a
+                    href={PLAY_STORE_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full min-h-[46px] px-3.5 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 active:scale-[0.98] text-white font-black text-xs sm:text-sm shadow-sm transition flex items-center justify-center gap-2 cursor-pointer touch-manipulation"
+                  >
+                    <ExternalLink className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Télécharger sur Google Play</span>
+                  </a>
+
+                  <button
+                    type="button"
+                    onClick={handleWebAppInstallClick}
+                    className="w-full min-h-[46px] px-3.5 py-2.5 rounded-2xl bg-[#EEF2FF] hover:bg-indigo-100 active:scale-[0.98] text-[#1E3A8A] border-2 border-indigo-200 font-black text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer touch-manipulation"
+                  >
+                    <Download className="w-4 h-4 text-[#1E3A8A] shrink-0" />
+                    <span>Installer l'application Web</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -679,6 +738,13 @@ export const WelcomeAuthScreen: React.FC<WelcomeAuthScreenProps> = ({
             onOpenSubscriptionModal(targetPlan, `Débloquer plus d'appareils pour ${targetPlan}`);
           }
         }}
+      />
+
+      <PWAInstallGuideModal
+        isOpen={showInstallGuideModal}
+        onClose={() => setShowInstallGuideModal(false)}
+        isIOS={isIOS}
+        isInstalled={isInstalled}
       />
     </div>
   );
