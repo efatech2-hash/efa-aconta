@@ -213,8 +213,66 @@ export async function getEffectivePlan(patron?: Patron | null): Promise<'essai' 
 }
 
 /**
- * RÈGLE STRICTE : Compte SEULEMENT les produits actifs de la boutique actuelle,
- * pas les supprimés (status = 'deleted' ou is_deleted = true), pas les autres boutiques.
+ * Résout l'ID du patron principal (`ownerId`) et TOUS les IDs de ses boutiques (Principale + Boutique 2 + Boutique 3)
+ */
+export async function resolvePatronStoreIds(patron: Patron): Promise<{ ownerId: string; storeIds: string[] }> {
+  let ownerId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
+
+  try {
+    const localPatrons = await db.patrons.toArray();
+    const selfLocal = localPatrons.find((p) => p.id === patron.id);
+    if (selfLocal) {
+      ownerId = selfLocal.parentId || selfLocal.ownerId || (selfLocal as any).patron_id || ownerId;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine && ownerId.startsWith('btq_sub_')) {
+      try {
+        const { data: selfRemote } = await supabase
+          .from('boutiques')
+          .select('id, patron_id')
+          .eq('id', ownerId)
+          .maybeSingle();
+        if (selfRemote?.patron_id) {
+          ownerId = selfRemote.patron_id;
+        }
+      } catch {}
+    }
+
+    const idSet = new Set<string>([ownerId, patron.id]);
+    for (const lp of localPatrons) {
+      if (
+        lp.id === ownerId ||
+        lp.parentId === ownerId ||
+        lp.ownerId === ownerId ||
+        (lp as any).patron_id === ownerId
+      ) {
+        idSet.add(lp.id);
+      }
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const { data: siblingStores } = await supabase
+          .from('boutiques')
+          .select('id, patron_id')
+          .or(`id.eq.${ownerId},patron_id.eq.${ownerId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`);
+        if (Array.isArray(siblingStores)) {
+          for (const s of siblingStores) {
+            if (s.id) idSet.add(s.id);
+          }
+        }
+      } catch {}
+    }
+
+    return { ownerId, storeIds: Array.from(idSet) };
+  } catch {
+    return { ownerId, storeIds: Array.from(new Set([ownerId, patron.id])) };
+  }
+}
+
+/**
+ * Compte uniquement les produits actifs de la boutique actuellement affichée (pour affichage inventaire local).
+ * Pour les limites d'abonnement, utiliser TOUJOURS getTotalProductsCountByPatron(patron).
  */
 export async function getActiveBoutiqueProductsCount(patron: Patron): Promise<number> {
   try {
@@ -266,60 +324,101 @@ export async function getActiveBoutiqueProductsCount(patron: Patron): Promise<nu
 }
 
 /**
- * Alias conservé pour compatibilité : retourne désormais STRICTEMENT le nombre de produits actifs
- * de la boutique actuelle (pas les supprimés, pas les autres boutiques).
+ * RÈGLE STRICTE : Les limites de produits sont par PATRON, partagées sur TOUTES ses boutiques.
+ * Compte total = COUNT(*) dans produits WHERE patron_id = patron actuel (ou l'une de ses boutiques),
+ * toutes boutiques confondues, hors produits supprimés (status = 'deleted' ou is_deleted = true).
  */
 export async function getTotalProductsCountByPatron(patron: Patron): Promise<number> {
-  return getActiveBoutiqueProductsCount(patron);
-}
-
-/**
- * Calcule le total de vendeurs / employés actifs (hors supprimés) par patron_id
- */
-export async function getTotalEmployesCountByPatron(patron: Patron): Promise<number> {
   try {
-    const ownerId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
-    let storeIds = [ownerId, patron.id];
+    const { ownerId, storeIds } = await resolvePatronStoreIds(patron);
+    const localAll = await db.produits.toArray();
+    const localActive = localAll.filter(
+      (p) =>
+        p.status !== 'deleted' &&
+        p.is_deleted !== true &&
+        (p.patron_id === ownerId ||
+          storeIds.includes(p.patron_id || '') ||
+          storeIds.includes(p.boutique_id || ''))
+    );
 
     if (typeof navigator !== 'undefined' && navigator.onLine) {
-      try {
-        const { data: siblingStores } = await supabase
-          .from('boutiques')
-          .select('id')
-          .or(`id.eq.${ownerId},patron_id.eq.${ownerId}${patron.telephone ? `,telephone.eq.${patron.telephone}` : ''}`);
-        if (siblingStores && siblingStores.length > 0) {
-          storeIds = Array.from(new Set([...storeIds, ...siblingStores.map((s) => s.id)]));
-        }
-      } catch {}
+      const orClauses = [
+        `patron_id.eq.${ownerId}`,
+        ...storeIds.map((sid) => `boutique_id.eq.${sid}`),
+        ...storeIds.filter((sid) => sid !== ownerId).map((sid) => `patron_id.eq.${sid}`),
+      ];
 
-      const orFilter = `patron_id.eq.${ownerId},${storeIds.map((sid) => `boutique_id.eq.${sid}`).join(',')}`;
-      const { data: remoteEmps, error } = await supabase
-        .from('employes')
+      const { data: remoteRows, error } = await supabase
+        .from('produits')
         .select('id, status, is_deleted')
-        .or(orFilter);
+        .or(orClauses.join(','));
 
-      if (!error && Array.isArray(remoteEmps)) {
-        const remoteActiveCount = remoteEmps.filter(
-          (e: any) => e.status !== 'deleted' && e.is_deleted !== true
-        ).length;
-        const localAll = await db.employes.toArray();
-        const localCount = localAll.filter(
-          (e) =>
-            e.status !== 'deleted' &&
-            e.is_deleted !== true &&
-            (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
-        ).length;
-        return Math.max(remoteActiveCount, localCount);
+      if (!error && Array.isArray(remoteRows)) {
+        const activeIds = new Set<string>(
+          remoteRows
+            .filter((r: any) => r.status !== 'deleted' && r.is_deleted !== true)
+            .map((r: any) => String(r.id))
+        );
+        for (const lp of localActive) {
+          if (lp.synced === false) {
+            activeIds.add(String(lp.id));
+          }
+        }
+        return activeIds.size;
       }
     }
 
+    return new Set(localActive.map((p) => String(p.id))).size;
+  } catch (err) {
+    console.warn('[getTotalProductsCountByPatron] Erreur:', err);
+    return 0;
+  }
+}
+
+/**
+ * Calcule le total d'employés / vendeurs actifs (hors supprimés) par patron_id,
+ * toutes boutiques du patron confondues (Principale + Boutique 2 + Boutique 3).
+ */
+export async function getTotalEmployesCountByPatron(patron: Patron): Promise<number> {
+  try {
+    const { ownerId, storeIds } = await resolvePatronStoreIds(patron);
     const localAll = await db.employes.toArray();
-    return localAll.filter(
+    const localActive = localAll.filter(
       (e) =>
         e.status !== 'deleted' &&
         e.is_deleted !== true &&
-        (storeIds.includes(e.boutique_id || '') || storeIds.includes(e.patron_id))
-    ).length;
+        (e.patron_id === ownerId ||
+          storeIds.includes(e.patron_id || '') ||
+          storeIds.includes(e.boutique_id || ''))
+    );
+
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const orClauses = [
+        `patron_id.eq.${ownerId}`,
+        ...storeIds.map((sid) => `boutique_id.eq.${sid}`),
+        ...storeIds.filter((sid) => sid !== ownerId).map((sid) => `patron_id.eq.${sid}`),
+      ];
+      const { data: remoteEmps, error } = await supabase
+        .from('employes')
+        .select('id, status, is_deleted')
+        .or(orClauses.join(','));
+
+      if (!error && Array.isArray(remoteEmps)) {
+        const activeIds = new Set<string>(
+          remoteEmps
+            .filter((e: any) => e.status !== 'deleted' && e.is_deleted !== true)
+            .map((e: any) => String(e.id))
+        );
+        for (const le of localActive) {
+          if ((le as any).synced === false) {
+            activeIds.add(String(le.id));
+          }
+        }
+        return activeIds.size;
+      }
+    }
+
+    return new Set(localActive.map((e) => String(e.id))).size;
   } catch (err) {
     console.warn('[getTotalEmployesCountByPatron] Erreur:', err);
     return 0;
@@ -327,11 +426,8 @@ export async function getTotalEmployesCountByPatron(patron: Patron): Promise<num
 }
 
 /**
- * VÉRIFICATION ASYNCHRONE DU QUOTA PRODUITS DE LA BOUTIQUE ACTIVE
- * Bloque SEULEMENT quand on DÉPASSE :
- * - Essai : 1er au 7ème passent sans avertissement (`currentCount < 7`), bloque au 8ème (`currentCount >= 7`)
- * - Populaire : 1er au 100ème passent sans avertissement (`currentCount < 100`), bloque au 101ème (`currentCount >= 100`)
- * - Pro : 1er au 300ème passent (`currentCount < 300`), bloque au 301ème (`currentCount >= 300`)
+ * VÉRIFICATION ASYNCHRONE DU QUOTA PRODUITS PARTAGÉ SUR TOUTES LES BOUTIQUES DU PATRON
+ * Bloque dès que totalPatron >= maxArticles (y compris si déjà > maxArticles suite à l'ancien bug, sans rien supprimer).
  */
 export async function checkCanAddProduct(patron: Patron): Promise<{
   allowed: boolean;
@@ -342,18 +438,12 @@ export async function checkCanAddProduct(patron: Patron): Promise<{
 }> {
   const plan = await getEffectivePlan(patron);
   const limites = getLimites(plan);
-  const currentCount = await getActiveBoutiqueProductsCount(patron);
+  const currentCount = await getTotalProductsCountByPatron(patron);
   const allowed = currentCount < limites.maxArticles;
 
   let message: string | undefined;
   if (!allowed) {
-    if (plan === 'essai') {
-      message = `Limite Essai atteinte : ${limites.maxArticles} articles max autorisés (${currentCount}/${limites.maxArticles}). Passez à Populaire (100) ou Pro (300) pour ajouter le ${limites.maxArticles + 1}ème article.`;
-    } else if (plan === 'populaire') {
-      message = `Limite Populaire atteinte : ${limites.maxArticles} articles max autorisés (${currentCount}/${limites.maxArticles}). Passez à Pro (300) pour en ajouter d'autres.`;
-    } else {
-      message = `Limite Pro atteinte : ${limites.maxArticles} articles max dans cette boutique.`;
-    }
+    message = `Limite de produits atteinte pour votre abonnement (${limites.maxArticles}/${limites.maxArticles}). Supprimez un produit ou passez à un plan supérieur.`;
   }
 
   return {
@@ -366,8 +456,7 @@ export async function checkCanAddProduct(patron: Patron): Promise<{
 }
 
 /**
- * VÉRIFICATION ASYNCHRONE DU QUOTA EMPLOYÉS / VENDEURS TOTAL PAR PATRON_ID
- * Ex: Essai si totalEmployes >= 1 bloque l'ajout du 2e vendeur !
+ * VÉRIFICATION ASYNCHRONE DU QUOTA EMPLOYÉS / VENDEURS TOTAL PAR PATRON_ID (toutes boutiques confondues)
  */
 export async function checkCanAddEmploye(patron: Patron): Promise<{
   allowed: boolean;
@@ -383,13 +472,7 @@ export async function checkCanAddEmploye(patron: Patron): Promise<{
 
   let message: string | undefined;
   if (!allowed) {
-    if (plan === 'essai') {
-      message = `Limite Essai atteinte : ${limites.maxVendeurs} vendeur max autorisé (${currentCount}/${limites.maxVendeurs}). Passez à Populaire (3) ou Pro (10) pour en ajouter d'autres.`;
-    } else if (plan === 'populaire') {
-      message = `Limite Populaire atteinte : ${limites.maxVendeurs} vendeurs max autorisés (${currentCount}/${limites.maxVendeurs}). Passez à Pro (10) pour en ajouter d'autres.`;
-    } else {
-      message = `Limite Pro atteinte : ${limites.maxVendeurs} vendeurs max pour toutes vos boutiques réunies.`;
-    }
+    message = `Limite d'employés atteinte (${limites.maxVendeurs}/${limites.maxVendeurs})`;
   }
 
   return {
@@ -711,7 +794,7 @@ export async function getSubscriptionUsage(patron: Patron | null | undefined) {
   const mainStoreId = patron.parentId || patron.ownerId || (patron as any).patron_id || patron.id;
 
   const [articlesCount, employesCount, appareilsCount, boutiquesCount] = await Promise.all([
-    getActiveBoutiqueProductsCount(patron),
+    getTotalProductsCountByPatron(patron),
     getTotalEmployesCountByPatron(patron),
     db.appareils.where('patron_id').equals(mainStoreId).count(),
     db.boutiques.where('patron_id').equals(mainStoreId).count(),

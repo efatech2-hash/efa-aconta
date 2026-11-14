@@ -10,6 +10,10 @@ import {
   canAddArticle,
   canAddVendeur,
   getActiveBoutiqueProductsCount,
+  getTotalProductsCountByPatron,
+  getTotalEmployesCountByPatron,
+  checkCanAddProduct,
+  checkCanAddEmploye,
   getRemainingTrialDays,
   isSubscriptionExpired,
 } from '../src/lib/checkLimits';
@@ -549,6 +553,124 @@ async function runTests() {
   assert.equal([rpc1, rpc2].filter((r) => r.success).length, 1, 'RPC atomic path: only 1 seller succeeds');
   assert.equal([rpc1, rpc2].filter((r) => !r.success).length, 1, 'RPC atomic path: 2nd seller rejected');
   assert.equal(rpcStock, 0);
+
+  // 10. BUG 3 : LIMITES D'ABONNEMENT PARTAGÉES SUR TOUTES LES BOUTIQUES (PAR PATRON_ID, PAS PAR BOUTIQUE)
+  await db.patrons.clear();
+  await db.produits.clear();
+  await db.employes.clear();
+
+  const b3Main: Patron = {
+    ...proPatron,
+    id: 'btq_bug3_main',
+    type: 'MAIN',
+    parentId: null,
+    ownerId: 'btq_bug3_main',
+  };
+  const b3Sub2: Patron = {
+    ...proPatron,
+    id: 'btq_sub_bug3_2',
+    type: 'SUB',
+    parentId: b3Main.id,
+    ownerId: b3Main.id,
+    patron_id: b3Main.id,
+    isSubOfPro: true,
+  };
+  const b3Sub3: Patron = {
+    ...proPatron,
+    id: 'btq_sub_bug3_3',
+    type: 'SUB',
+    parentId: b3Main.id,
+    ownerId: b3Main.id,
+    patron_id: b3Main.id,
+    isSubOfPro: true,
+  };
+  await db.patrons.bulkPut([b3Main, b3Sub2, b3Sub3]);
+
+  // Produits répartis sur 3 boutiques : 120 Main + 100 B2 + 80 B3 = 300 actifs (+ 5 supprimés qui ne comptent pas)
+  const makeProd = (id: string, btqId: string, status: 'active' | 'deleted' = 'active') => ({
+    id,
+    patron_id: b3Main.id,
+    boutique_id: btqId,
+    nom: id,
+    photo_url: '',
+    prix_achat: 100,
+    prix_vente: 200,
+    stock_qte: 5,
+    seuil_alerte: 1,
+    status,
+    is_deleted: status === 'deleted',
+    created_at: new Date().toISOString(),
+  });
+  await db.produits.bulkPut([
+    ...Array.from({ length: 120 }, (_, i) => makeProd(`b3_m_${i}`, b3Main.id)),
+    ...Array.from({ length: 100 }, (_, i) => makeProd(`b3_2_${i}`, b3Sub2.id)),
+    ...Array.from({ length: 80 }, (_, i) => makeProd(`b3_3_${i}`, b3Sub3.id)),
+    ...Array.from({ length: 5 }, (_, i) => makeProd(`b3_del_${i}`, b3Main.id, 'deleted')),
+  ]);
+
+  assert.equal(await getTotalProductsCountByPatron(b3Main), 300, 'Main must see cumulative total = 300');
+  assert.equal(await getTotalProductsCountByPatron(b3Sub2), 300, 'Sub2 must see cumulative total = 300');
+  assert.equal(await getTotalProductsCountByPatron(b3Sub3), 300, 'Sub3 must see cumulative total = 300');
+
+  const checkProdMain = await checkCanAddProduct(b3Main);
+  const checkProdSub2 = await checkCanAddProduct(b3Sub2);
+  const checkProdSub3 = await checkCanAddProduct(b3Sub3);
+  const expectedProdLimitMsg =
+    'Limite de produits atteinte pour votre abonnement (300/300). Supprimez un produit ou passez à un plan supérieur.';
+  assert.equal(checkProdMain.allowed, false);
+  assert.equal(checkProdSub2.allowed, false);
+  assert.equal(checkProdSub3.allowed, false);
+  assert.equal(checkProdSub2.message, expectedProdLimitMsg);
+
+  // Ancien bug : surplus 900 produits (300 par boutique) -> ne supprime rien, bloque jusqu'à repasser < 300
+  await db.produits.bulkPut([
+    ...Array.from({ length: 600 }, (_, i) => makeProd(`b3_old_surplus_${i}`, i < 300 ? b3Sub2.id : b3Sub3.id)),
+  ]);
+  const checkGrandfathered = await checkCanAddProduct(b3Main);
+  assert.equal(checkGrandfathered.allowed, false, '900 grandfathered products must block additions');
+  assert.equal(checkGrandfathered.currentCount, 900, 'No existing product should be deleted');
+  assert.equal(checkGrandfathered.message, expectedProdLimitMsg);
+
+  // Employés partagés : 4 Main + 3 B2 + 3 B3 = 10 -> 11ème bloqué sur toutes les boutiques
+  const makeEmp = (id: string, btqId: string, status: 'active' | 'deleted' = 'active') => ({
+    id,
+    patron_id: b3Main.id,
+    boutique_id: btqId,
+    nom: id,
+    telephone: '+22890000000',
+    pin_hash: 'h',
+    genre: 'femme' as const,
+    role: 'vendeuse' as const,
+    status,
+    is_deleted: status === 'deleted',
+    is_active: true,
+    created_at: new Date().toISOString(),
+  });
+  await db.employes.bulkPut([
+    ...Array.from({ length: 4 }, (_, i) => makeEmp(`emp_m_${i}`, b3Main.id)),
+    ...Array.from({ length: 3 }, (_, i) => makeEmp(`emp_2_${i}`, b3Sub2.id)),
+    ...Array.from({ length: 3 }, (_, i) => makeEmp(`emp_3_${i}`, b3Sub3.id)),
+    makeEmp('emp_del_1', b3Main.id, 'deleted'),
+  ]);
+  assert.equal(await getTotalEmployesCountByPatron(b3Main), 10);
+  assert.equal(await getTotalEmployesCountByPatron(b3Sub3), 10);
+
+  const checkEmpMain = await checkCanAddEmploye(b3Main);
+  const checkEmpSub2 = await checkCanAddEmploye(b3Sub2);
+  assert.equal(checkEmpMain.allowed, false);
+  assert.equal(checkEmpSub2.allowed, false);
+  assert.equal(checkEmpSub2.message, "Limite d'employés atteinte (10/10)");
+
+  // Vérifier présence garde vocale App.tsx + migration SQL Supabase
+  assert.ok(appSrc.includes('checkCanAddProduct(patron)'), 'App.tsx voice produit must check shared patron quota');
+  const sqlBug3Src = fs.readFileSync('supabase/migrations/20261113_000002_enforce_shared_patron_limits.sql', 'utf8');
+  assert.ok(
+    sqlBug3Src.includes('enforce_shared_patron_product_limit') &&
+      sqlBug3Src.includes('enforce_shared_patron_employe_limit') &&
+      sqlBug3Src.includes('trg_enforce_shared_patron_product_limit') &&
+      sqlBug3Src.includes('trg_enforce_shared_patron_employe_limit'),
+    'Supabase triggers must enforce shared patron limits on produits and employes'
+  );
 
   console.log('✅ ALL VERIFICATION & REGRESSION TESTS PASSED!');
 }

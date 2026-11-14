@@ -39,7 +39,7 @@ import { HistoriqueScreen } from './components/HistoriqueScreen';
 import { SubscriptionModal } from './components/SubscriptionModal';
 import { PinLockScreen } from './components/PinLockScreen';
 import { logAction } from './lib/historique';
-import { isSubscriptionExpired, syncEmployeesSubscription, isBoutiquePro } from './lib/checkLimits';
+import { isSubscriptionExpired, syncEmployeesSubscription, isBoutiquePro, checkCanAddProduct } from './lib/checkLimits';
 import { speakFrench } from './lib/speech';
 import { supabase } from './lib/supabase';
 import { getIsPickingPhoto } from './lib/camera';
@@ -1650,12 +1650,29 @@ export default function App() {
         await logAction({ patron_id: mainPatronId, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'depense', description: `Dépense vocale ${depData.type}: ${depData.montant}F (${depData.description || 'Sans détail'}) par ${currentUser.nom}`, montant: depData.montant }).catch(console.error);
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'produit') {
+        const quotaCheck = await checkCanAddProduct(patron);
+        if (!quotaCheck.allowed) {
+          const limitMsg =
+            quotaCheck.message ||
+            `Limite de produits atteinte pour votre abonnement (${quotaCheck.maxLimit}/${quotaCheck.maxLimit}). Supprimez un produit ou passez à un plan supérieur.`;
+          showToastBottom(limitMsg);
+          speakFrench(limitMsg);
+          if (quotaCheck.plan !== 'pro') {
+            handleOpenSubscriptionModal(quotaCheck.plan === 'essai' ? 'populaire' : 'pro', limitMsg);
+          }
+          return;
+        }
         const prodData = action.data;
         const prodId = 'prod-vocal-' + Date.now();
         const prodRecord: Produit = { id: prodId, patron_id: mainPatronId || patron.id, boutique_id: activeBoutiqueId, nom: prodData.nom, photo_url: 'https://images.unsplash.com/photo-1578587018452-892bacefd3f2?auto=format&fit=crop&w=400&q=80', prix_achat: prodData.prix_achat, prix_vente: prodData.prix_vente, stock_qte: prodData.stock_qte, seuil_alerte: 5, created_at: new Date().toISOString() };
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            const { resolvedPatronId } = await upsertProduitSafely(prodRecord, patron);
+            const { error: prodErr, resolvedPatronId } = await upsertProduitSafely(prodRecord, patron);
+            if (prodErr && String(prodErr?.message || '').includes('Limite de produits atteinte')) {
+              showToastBottom(String(prodErr.message));
+              speakFrench(String(prodErr.message));
+              return;
+            }
             prodRecord.patron_id = resolvedPatronId || patron.id;
           } catch {
             // ignore

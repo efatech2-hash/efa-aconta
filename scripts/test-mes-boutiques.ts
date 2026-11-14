@@ -123,9 +123,9 @@ async function runAllTests() {
   const resBoutique4 = await createSubBoutique({ mainPatron, nom: 'Boutique 4 - Illégale' });
   assert(!resBoutique4.success, 'Tentative de 4e boutique bloquée (limite 3 boutiques Pro)');
 
-  // Règle d'or articles : 300 articles actifs max par boutique active (sans compter supprimés ni autres boutiques)
-  console.log('  -> Insertion de 300 articles actifs sur la boutique Principale...');
-  const prodsMain: Produit[] = Array.from({ length: 300 }).map((_, i) => ({
+  // Règle d'or articles : 300 articles actifs MAX PARTAGÉS par patron_id sur Principale + Boutique 2 + Boutique 3
+  console.log('  -> Insertion de 150 articles Principale + 100 Boutique 2 + 50 Boutique 3 (= 300 cumulés)...');
+  const prodsMain: Produit[] = Array.from({ length: 150 }).map((_, i) => ({
     id: `prod_main_${i}`,
     patron_id: mainPatron.id,
     boutique_id: mainPatron.id,
@@ -138,9 +138,6 @@ async function runAllTests() {
     seuil_alerte: 3,
     created_at: now,
   }));
-  await db.produits.bulkPut(prodsMain);
-
-  console.log('  -> Insertion de 100 articles actifs sur Boutique 2 (indépendants)...');
   const prodsB2: Produit[] = Array.from({ length: 100 }).map((_, i) => ({
     id: `prod_b2_${i}`,
     patron_id: boutique2.id,
@@ -154,15 +151,60 @@ async function runAllTests() {
     seuil_alerte: 2,
     created_at: now,
   }));
-  await db.produits.bulkPut(prodsB2);
+  const prodsB3: Produit[] = Array.from({ length: 50 }).map((_, i) => ({
+    id: `prod_b3_${i}`,
+    patron_id: mainPatron.id,
+    boutique_id: boutique3.id,
+    nom: `Sac Bè Beach #${i + 1}`,
+    photo_url: '',
+    categorie: 'Accessoires',
+    prix_vente: 8000,
+    prix_achat: 5000,
+    stock_qte: 8,
+    seuil_alerte: 2,
+    created_at: now,
+  }));
+  await db.produits.bulkPut([...prodsMain, ...prodsB2, ...prodsB3]);
 
-  // Vérification blocage 301e article sur MAIN (qui a déjà 300 articles actifs)
+  const totalArtCumul = await getTotalArticleCount(mainPatron.id);
+  assert(totalArtCumul === 300, `Total cumulé toutes boutiques = 300 (trouvé: ${totalArtCumul})`);
+
+  // Vérification blocage 301e article sur MAIN, Boutique 2 ET Boutique 3
+  const expectedProdMsg =
+    'Limite de produits atteinte pour votre abonnement (300/300). Supprimez un produit ou passez à un plan supérieur.';
   const checkAddMain = await canAddArticlePro(mainPatron.id);
-  assert(!checkAddMain.allowed, 'Ajout du 301e article sur la boutique principale BLOQUÉ');
+  assert(!checkAddMain.allowed && checkAddMain.message === expectedProdMsg, `Ajout 301e sur MAIN BLOQUÉ : "${checkAddMain.message}"`);
 
-  // Vérification que Boutique 2 (100 articles actifs) peut toujours ajouter un article
-  const checkAddSub = await canAddArticlePro(boutique2.id);
-  assert(checkAddSub.allowed && checkAddSub.currentTotal === 100, 'Boutique 2 (100/300) reste autorisée indépendamment de MAIN');
+  const checkAddSub2 = await canAddArticlePro(boutique2.id);
+  assert(!checkAddSub2.allowed && checkAddSub2.currentTotal === 300 && checkAddSub2.message === expectedProdMsg, 'Boutique 2 BLOQUÉE car total patron = 300/300');
+
+  const checkAddSub3 = await canAddArticlePro(boutique3.id);
+  assert(!checkAddSub3.allowed && checkAddSub3.currentTotal === 300, 'Boutique 3 BLOQUÉE car total patron = 300/300');
+
+  // Test surplus historique (>300) : rien n'est supprimé, les ajouts restent bloqués jusqu'à repasser sous 300
+  const surplusProds: Produit[] = Array.from({ length: 10 }).map((_, i) => ({
+    id: `prod_surplus_${i}`,
+    patron_id: mainPatron.id,
+    boutique_id: mainPatron.id,
+    nom: `Surplus #${i + 1}`,
+    photo_url: '',
+    categorie: 'Divers',
+    prix_vente: 2000,
+    prix_achat: 1000,
+    stock_qte: 1,
+    seuil_alerte: 1,
+    created_at: now,
+  }));
+  await db.produits.bulkPut(surplusProds);
+  const checkSurplus = await canAddArticlePro(boutique2.id);
+  assert(!checkSurplus.allowed && checkSurplus.currentTotal === 310, 'Surplus (310/300) bloque les nouveaux ajouts sans rien supprimer');
+  assert((await db.produits.count()) === 310, 'Aucun produit surplus existant supprimé');
+
+  // Retirer le surplus + 1 pour vérifier que repasser à 299 réautorise l'ajout
+  await db.produits.bulkDelete([...surplusProds.map((p) => p.id), 'prod_b3_49']);
+  const checkUnder = await canAddArticlePro(boutique3.id);
+  assert(checkUnder.allowed && checkUnder.currentTotal === 299, 'En dessous de 300 (299/300), l’ajout est de nouveau autorisé');
+  await db.produits.put(prodsB3[49]);
 
   // =========================================================================
   // TEST 2 : 10 EMPLOYÉS RÉPARTIS SUR 3 BOUTIQUES & BLOCAGE AU 11E
@@ -198,13 +240,13 @@ async function runAllTests() {
   const checkAddEmp = await canAddEmployeePro(mainPatron.id);
   assert(!checkAddEmp.allowed, 'Ajout du 11e employé BLOQUÉ');
   assert(
-    checkAddEmp.message === 'Limite Pro atteinte : 10 employés pour toutes tes boutiques réunies.',
+    checkAddEmp.message === "Limite d'employés atteinte (10/10)",
     `Message officiel d'employé respecté : "${checkAddEmp.message}"`
   );
 
   // Vérification que le blocage s'applique également depuis Boutique 2 ou 3
   const checkAddEmpB2 = await canAddEmployeePro(boutique2.id);
-  assert(!checkAddEmpB2.allowed, 'Ajout du 11e employé bloqué depuis Boutique 2 (SUB)');
+  assert(!checkAddEmpB2.allowed && checkAddEmpB2.message === "Limite d'employés atteinte (10/10)", 'Ajout du 11e employé bloqué depuis Boutique 2 (SUB)');
 
   // =========================================================================
   // TEST 3 : VERROUILLAGE APPAREIL BOUTIQUE 2 & ISOLATION VENDEUR

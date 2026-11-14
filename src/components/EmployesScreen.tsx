@@ -36,7 +36,7 @@ import {
 } from '../lib/camera';
 import { COUNTRY_CODES, validatePhoneNumber } from '../lib/countryCodes';
 import { logAction } from '../lib/historique';
-import { canAddEmploye, canAddVendeur, getVendeurLimitInfo, PLAN_CONFIGS, checkCanAddEmploye, getLimites } from '../lib/checkLimits';
+import { canAddEmploye, canAddVendeur, getVendeurLimitInfo, PLAN_CONFIGS, checkCanAddEmploye, getLimites, getTotalEmployesCountByPatron } from '../lib/checkLimits';
 import {
   isProActive,
   isPatronGloballyPro,
@@ -75,20 +75,26 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  // LOGIQUE DES 10 EMPLOYÉS PARTAGÉS (PRO)
+  // LOGIQUE DES EMPLOYÉS PARTAGÉS SUR TOUTES LES BOUTIQUES DU PATRON
   const mainStoreId = getMainStoreId(patron);
   const [isPro, setIsPro] = useState<boolean>(isProActive(patron));
-  const [totalEmployesPro, setTotalEmployesPro] = useState<number>(employes.length);
+  const [totalEmployesPatron, setTotalEmployesPatron] = useState<number>(() =>
+    employes.filter((e) => e.status !== 'deleted' && !e.is_deleted).length
+  );
 
   useEffect(() => {
+    let mounted = true;
     isPatronGloballyPro(patron).then((proActive) => {
-      setIsPro(proActive);
-      if (proActive) {
-        getTotalEmployeeCount(mainStoreId).then(setTotalEmployesPro);
-      } else {
-        setTotalEmployesPro(employes.length);
-      }
+      if (mounted) setIsPro(proActive);
     });
+    getTotalEmployesCountByPatron(patron)
+      .then((cnt) => {
+        if (mounted) setTotalEmployesPatron(cnt);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
   }, [patron, employes, mainStoreId]);
 
   // Restauration automatique du formulaire si déchargé par Android
@@ -136,12 +142,12 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
         const { data, error }: any = await withTimeout(query, 5000);
 
         if (!error && data) {
-          await db.employes.where('patron_id').equals(patron.id).delete();
+          await db.employes.where('boutique_id').equals(patron.id).delete().catch(() => {});
           for (const emp of data) {
             const mappedEmp: Employe = {
               id: emp.id,
-              boutique_id: patron.id,
-              patron_id: patron.id,
+              boutique_id: emp.boutique_id || patron.id,
+              patron_id: emp.patron_id || mainStoreId || patron.id,
               nom: emp.nom,
               role: (emp.role as any) || 'vendeuse',
               telephone: emp.telephone || '',
@@ -185,7 +191,8 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
   const currentPlan = isPro ? 'pro' : (patron.subscription_status || 'trial');
   const maxAllowedEmployes = getLimites(currentPlan).maxVendeurs;
   const activeEmployes = employes.filter((e) => e.status !== 'deleted' && !e.is_deleted);
-  const canAddMore = isPro ? totalEmployesPro < maxAllowedEmployes : canAddEmploye(patron, activeEmployes.length);
+  const sharedEmployesCount = Math.max(activeEmployes.length, totalEmployesPatron);
+  const canAddMore = canAddEmploye(patron, sharedEmployesCount);
 
   // Capture / Sélection photo in-app Capacitor sans navigation externe ni rechargement
   const handleCamera = async () => {
@@ -282,7 +289,7 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
       const newEmploye: Employe = {
         id: empId,
         boutique_id: patron.id,
-        patron_id: patron.id,
+        patron_id: mainStoreId || patron.id,
         nom: nom.trim(),
         telephone: `${phoneCountry} ${cleanDigits}`,
         phone_country: phoneCountry,
@@ -564,13 +571,11 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
       <div className="space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
           <h3 className="text-lg font-black text-gray-900">
-            Profils de la caisse ({employes.length} / {isPro ? 10 : maxAllowedEmployes}) :
+            Profils de la caisse ({sharedEmployesCount} / {maxAllowedEmployes}) :
           </h3>
-          {isPro && (
-            <span className="text-xs font-bold text-purple-700 bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200 w-fit">
-              👥 Employés utilisés : {totalEmployesPro} / 10 (toutes boutiques)
-            </span>
-          )}
+          <span className="text-xs font-bold text-purple-700 bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200 w-fit">
+            👥 Employés utilisés : {sharedEmployesCount} / {maxAllowedEmployes} (toutes boutiques)
+          </span>
         </div>
 
         <div className="grid grid-cols-1 gap-3">
@@ -961,21 +966,19 @@ export const EmployesScreen: React.FC<EmployesScreenProps> = ({
             <Lock className="w-6 h-6" />
           </div>
           <h4 className="font-black text-base text-gray-900">
-            {currentPlan === 'trial' || currentPlan === 'free'
-              ? '1 vendeur max en essai gratuit'
-              : `Limite de ${maxAllowedEmployes} vendeurs atteinte`}
+            Limite d'employés atteinte ({maxAllowedEmployes}/{maxAllowedEmployes})
           </h4>
           <p className="text-xs font-semibold text-gray-600 max-w-md mx-auto">
             {currentPlan === 'trial' || currentPlan === 'free'
               ? 'En essai gratuit, vous avez droit à 1 vendeur max. Passez à Populaire (3 vendeurs) ou Boutique Pro (10 vendeurs).'
               : currentPlan !== 'pro'
               ? 'Passez à Boutique Pro pour débloquer jusqu\'à 10 vendeurs avec code PIN personnel.'
-              : 'Vous avez atteint le maximum de 10 vendeurs autorisés.'}
+              : 'Vous avez atteint le maximum de 10 vendeurs autorisés sur toutes vos boutiques réunies.'}
           </p>
           {currentPlan !== 'pro' && onOpenSubscriptionModal && (
             <button
               type="button"
-              onClick={() => onOpenSubscriptionModal('populaire', '1 vendeur max en essai gratuit. Passez à Populaire pour 3 vendeurs ou Pro pour 10')}
+              onClick={() => onOpenSubscriptionModal('populaire', `Limite d'employés atteinte (${maxAllowedEmployes}/${maxAllowedEmployes})`)}
               className="px-5 py-2.5 rounded-2xl bg-[#6C5CE7] hover:bg-[#5848c7] active:scale-95 text-white font-black text-xs sm:text-sm shadow-md transition cursor-pointer"
             >
               Passer à Populaire (3 vendeurs) ou Pro (10) 🚀

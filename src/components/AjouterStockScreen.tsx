@@ -18,7 +18,7 @@ import { db } from '../lib/db';
 import { queueSyncItem } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
 import { logAction } from '../lib/historique';
-import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites } from '../lib/checkLimits';
+import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites, getTotalProductsCountByPatron } from '../lib/checkLimits';
 import { getMainStoreId } from '../lib/mesBoutiques';
 import { checkProductQuota, uploadProductImage } from '../lib/productStorage';
 import { normalizePlanForCompression, type ProductPlan } from '../lib/productCompressor';
@@ -86,13 +86,30 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
     }
   }, []);
 
+  const [sharedProductCount, setSharedProductCount] = useState<number>(() =>
+    products.filter((p) => p.status !== 'deleted' && !p.is_deleted).length
+  );
+
+  React.useEffect(() => {
+    let active = true;
+    getTotalProductsCountByPatron(patron)
+      .then((cnt) => {
+        if (active) setSharedProductCount(cnt);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [patron, products]);
+
   // Marge auto calculée
   const numAchat = parseInt(prixAchat, 10) || 0;
   const numVente = parseInt(prixVente, 10) || 0;
   const marge = numVente - numAchat;
   const activeProducts = products.filter((p) => p.status !== 'deleted' && !p.is_deleted);
   const currentLimites = getLimites(patron.subscription_status === 'pro' || patron.isProActive ? 'pro' : (patron.subscription_status || 'essai'));
-  const isLimitReached = !canAddArticle(patron, activeProducts.length);
+  const totalPatronArticles = Math.max(activeProducts.length, sharedProductCount);
+  const isLimitReached = !canAddArticle(patron, totalPatronArticles);
 
   // Capture CAMÉRA in-app Capacitor
   const handleCamera = async () => {
@@ -315,7 +332,7 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
         </div>
       )}
 
-      {/* Bannière Limite Articles Atteinte (affichée uniquement quand la limite est dépassée) */}
+      {/* Bannière Limite Articles Atteinte (partagée sur toutes les boutiques du patron) */}
       {isLimitReached && (
         <div className="p-4 sm:p-5 rounded-3xl bg-amber-50 border-2 border-amber-300 text-amber-950 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
           <div className="flex items-center gap-3">
@@ -324,16 +341,14 @@ export const AjouterStockScreen: React.FC<AjouterStockScreenProps> = ({
             </div>
             <div>
               <h4 className="font-black text-sm sm:text-base">
-                Limite atteinte : {activeProducts.length} / {currentLimites.maxArticles} articles max
+                Limite de produits atteinte pour votre abonnement ({currentLimites.maxArticles}/{currentLimites.maxArticles}).
               </h4>
               <p className="text-xs font-semibold text-amber-800">
-                {currentLimites.plan === 'essai'
-                  ? 'Passez à Populaire (100 articles) ou Pro (300 articles) pour continuer.'
-                  : 'Passez à Boutique Pro pour débloquer jusqu’à 300 articles !'}
+                Supprimez un produit ou passez à un plan supérieur. ({totalPatronArticles} / {currentLimites.maxArticles} utilisés sur toutes vos boutiques)
               </p>
             </div>
           </div>
-          {onOpenSubscriptionModal && (
+          {onOpenSubscriptionModal && currentLimites.plan !== 'pro' && (
             <button
               type="button"
               onClick={() => onOpenSubscriptionModal(currentLimites.plan === 'essai' ? 'populaire' : 'pro', 'Augmenter votre limite d\'articles')}

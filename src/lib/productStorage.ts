@@ -30,7 +30,7 @@ export interface QuotaCheckResult {
   message?: string;
 }
 
-import { getLimites } from './checkLimits';
+import { getLimites, resolvePatronStoreIds } from './checkLimits';
 
 export async function checkProductQuota(
   userId: string,
@@ -38,40 +38,40 @@ export async function checkProductQuota(
 ): Promise<QuotaCheckResult> {
   const normPlan = plan === 'pro' ? 'pro' : plan === 'payant' ? 'populaire' : 'essai';
   const limites = getLimites(normPlan);
-  const isSub = userId.startsWith('btq_sub_');
+  const { ownerId, storeIds } = await resolvePatronStoreIds({ id: userId } as any);
 
   const localAll = await db.produits.toArray();
   const localActive = localAll.filter(
     (p) =>
       p.status !== 'deleted' &&
       p.is_deleted !== true &&
-      (isSub
-        ? p.boutique_id === userId
-        : p.boutique_id
-        ? p.boutique_id === userId
-        : p.patron_id === userId)
+      (p.patron_id === ownerId ||
+        storeIds.includes(p.patron_id || '') ||
+        storeIds.includes(p.boutique_id || ''))
   );
-  let count = localActive.length;
+  let count = new Set(localActive.map((p) => String(p.id))).size;
 
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
-      const orFilter = isSub
-        ? `boutique_id.eq.${userId}`
-        : `boutique_id.eq.${userId},and(boutique_id.is.null,patron_id.eq.${userId})`;
+      const orClauses = [
+        `patron_id.eq.${ownerId}`,
+        ...storeIds.map((sid) => `boutique_id.eq.${sid}`),
+        ...storeIds.filter((sid) => sid !== ownerId).map((sid) => `patron_id.eq.${sid}`),
+      ];
 
       const { data: remoteRows, error: prodErr } = await supabase
         .from('produits')
         .select('id, status, is_deleted')
-        .or(orFilter);
+        .or(orClauses.join(','));
 
       if (!prodErr && Array.isArray(remoteRows)) {
         const remoteIds = new Set(
           remoteRows
             .filter((r: any) => r.status !== 'deleted' && r.is_deleted !== true)
-            .map((r: any) => r.id)
+            .map((r: any) => String(r.id))
         );
         for (const lp of localActive) {
-          if (lp.synced === false) remoteIds.add(lp.id);
+          if (lp.synced === false) remoteIds.add(String(lp.id));
         }
         count = remoteIds.size;
       }
@@ -85,12 +85,7 @@ export async function checkProductQuota(
   const allowed = count < maxLimit;
 
   if (!allowed) {
-    const msg =
-      normPlan === 'essai'
-        ? `Limite atteinte (7 articles max en essai gratuit). Passez à Populaire pour 100 articles`
-        : normPlan === 'populaire'
-        ? `Limite de 100 articles atteinte. Passez en Pro pour 300 articles`
-        : `Limite Pro atteinte : 300 articles max.`;
+    const msg = `Limite de produits atteinte pour votre abonnement (${maxLimit}/${maxLimit}). Supprimez un produit ou passez à un plan supérieur.`;
     return {
       allowed: false,
       currentCount: count,

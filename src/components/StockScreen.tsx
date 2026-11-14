@@ -23,7 +23,7 @@ import { db } from '../lib/db';
 import { queueSyncItem } from '../lib/sync';
 import { speakFrench } from '../lib/speech';
 import { logAction } from '../lib/historique';
-import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites } from '../lib/checkLimits';
+import { canAddArticle, getArticleLimitInfo, checkCanAddProduct, getLimites, getTotalProductsCountByPatron } from '../lib/checkLimits';
 import {
   isProActive,
   getMainStoreId,
@@ -87,14 +87,28 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  // COMPTE STRICT : Produits actifs de la boutique actuelle uniquement (pas les supprimés, pas les autres boutiques)
+  // COMPTE PARTAGÉ PAR PATRON : Total produits actifs sur TOUTES les boutiques du patron (Principale + Boutique 2 + Boutique 3)
   const isPro = isProActive(patron);
   const mainStoreId = getMainStoreId(patron);
   const userPlan: ProductPlan = normalizePlanForCompression(patron.subscription_status);
   const currentLimites = getLimites(isPro ? 'pro' : (patron.subscription_status || 'essai'));
   const maxArticlesPlan = currentLimites.maxArticles;
   const activeProducts = products.filter((p) => p.status !== 'deleted' && !p.is_deleted);
-  const currentTotalArticles = activeProducts.length;
+  const [sharedProductCount, setSharedProductCount] = useState<number>(activeProducts.length);
+
+  React.useEffect(() => {
+    let mounted = true;
+    getTotalProductsCountByPatron(patron)
+      .then((cnt) => {
+        if (mounted) setSharedProductCount(cnt);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [patron, products]);
+
+  const currentTotalArticles = Math.max(activeProducts.length, sharedProductCount);
   const quotaPercent = Math.min(100, Math.round((currentTotalArticles / maxArticlesPlan) * 100));
 
   // Chargement direct des produits depuis Supabase pour cette boutique
@@ -634,15 +648,15 @@ export const StockScreen: React.FC<StockScreenProps> = ({
             Inventaire Boutique
           </span>
           <h3 className="text-2xl sm:text-3xl font-black">
-            {currentTotalArticles} Articles en catalogue
+            {activeProducts.length} Articles en catalogue
           </h3>
 
-          {/* QUOTA UTILISÉ AVEC BARRE DE PROGRESSION */}
+          {/* QUOTA UTILISÉ AVEC BARRE DE PROGRESSION (PARTAGÉ TOUTES BOUTIQUES) */}
           <div className="mt-3 space-y-2 w-full max-w-sm">
             <div className="flex items-center justify-between text-xs font-black">
               <span className="flex items-center gap-1.5 text-emerald-100">
                 <Package className="w-3.5 h-3.5 text-amber-300" />
-                <span>{currentTotalArticles} / {maxArticlesPlan} produits actifs</span>
+                <span>{currentTotalArticles} / {maxArticlesPlan} produits actifs (toutes boutiques)</span>
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
@@ -691,11 +705,11 @@ export const StockScreen: React.FC<StockScreenProps> = ({
           type="button"
           onClick={async () => {
             if (!canAddArticle(patron, currentTotalArticles)) {
+              const limitMsg = `Limite de produits atteinte pour votre abonnement (${maxArticlesPlan}/${maxArticlesPlan}). Supprimez un produit ou passez à un plan supérieur.`;
               const targetPlan = currentLimites.plan === 'essai' ? 'populaire' : 'pro';
+              alert(limitMsg);
               if (onOpenSubscriptionModal) {
-                onOpenSubscriptionModal(targetPlan, `Limite d'articles atteinte (${currentTotalArticles}/${maxArticlesPlan} articles)`);
-              } else {
-                alert(`Limite atteinte : ${maxArticlesPlan} articles max pour cette boutique.`);
+                onOpenSubscriptionModal(targetPlan, limitMsg);
               }
               return;
             }
@@ -732,8 +746,10 @@ export const StockScreen: React.FC<StockScreenProps> = ({
             type="button"
             onClick={() => {
               if (!canAddArticle(patron, currentTotalArticles)) {
+                const limitMsg = `Limite de produits atteinte pour votre abonnement (${maxArticlesPlan}/${maxArticlesPlan}). Supprimez un produit ou passez à un plan supérieur.`;
+                alert(limitMsg);
                 if (onOpenSubscriptionModal) {
-                  onOpenSubscriptionModal(currentLimites.plan === 'essai' ? 'populaire' : 'pro', `Limite d'articles atteinte (${currentTotalArticles}/${maxArticlesPlan} articles)`);
+                  onOpenSubscriptionModal(currentLimites.plan === 'essai' ? 'populaire' : 'pro', limitMsg);
                 }
                 return;
               }
