@@ -13,7 +13,8 @@ import {
   getRemainingTrialDays,
   isSubscriptionExpired,
 } from '../src/lib/checkLimits';
-import { checkAndGiveReferralBonus } from '../src/lib/ambassadeur';
+import { checkAndGiveReferralBonus, computePreservedParrainBonusUpdate } from '../src/lib/ambassadeur';
+import { atomicDecrementProductStock } from '../src/lib/supabaseHelper';
 import { COUNTRY_CODES, formatPhoneWithCountryCode, validatePhoneNumber } from '../src/lib/countryCodes';
 import type { Patron } from '../src/lib/types';
 
@@ -28,7 +29,7 @@ if (typeof globalThis.localStorage === 'undefined') {
 }
 
 async function runTests() {
-  console.log('🧪 Running verification checks for all 3 fixes & existing invariants...');
+  console.log('🧪 Running verification checks for all fixes & existing invariants...');
 
   // 0. Invariants conservés (suppression crédit unique, logs_suppression, efa-photos, EmployeeId, upsertProduitSafely)
   assert.equal(
@@ -353,6 +354,201 @@ async function runTests() {
       !welcomeSrc.includes('.apk'),
     'WelcomeAuthScreen must display Google Play + Web App download buttons and NEVER direct APK download'
   );
+
+  // 7. BUG 1 : PARRAINAGE PRESERVE PLAN (POPULAIRE 365j+60j=425j / PRO 365j+60j=425j, JAMAIS essai 21j)
+  const fixedNow = new Date('2026-01-01T00:00:00.000Z');
+  const end365 = new Date(fixedNow.getTime() + 365 * 86400000).toISOString();
+
+  // Cas 1A: Parrain Populaire (365j + 60j = 425j, garde populaire)
+  const popBonus = computePreservedParrainBonusUpdate({
+    boutiquesRow: { plan: 'populaire', subscription_end_date: end365 },
+    patronsRow: { subscription_status: 'populaire', forfait: 'populaire' },
+    now: fixedNow,
+  });
+  const popDays = Math.round((new Date(popBonus.newEndIso).getTime() - fixedNow.getTime()) / 86400000);
+  assert.equal(popDays, 425, 'Parrain Populaire 365j + 60j MUST equal 425j');
+  assert.equal(popBonus.preservedPlan, 'populaire', 'Parrain Populaire MUST keep plan = populaire');
+  assert.equal(popBonus.preservedSubStatus, 'populaire');
+  assert.equal(popBonus.isPopulaire, true);
+  assert.equal(popBonus.isPro, false);
+
+  // Cas 1B: Parrain Pro (365j + 60j = 425j, garde pro)
+  const proBonus = computePreservedParrainBonusUpdate({
+    boutiquesRow: { plan: 'pro_annuel', subscription_end_date: end365, last_payment_amount: 90000 },
+    patronsRow: { subscription_status: 'pro', forfait: 'pro_annuel' },
+    now: fixedNow,
+  });
+  const proDays = Math.round((new Date(proBonus.newEndIso).getTime() - fixedNow.getTime()) / 86400000);
+  assert.equal(proDays, 425, 'Parrain Pro 365j + 60j MUST equal 425j');
+  assert.equal(proBonus.preservedPlan, 'pro_annuel', 'Parrain Pro MUST keep its pro plan');
+  assert.equal(proBonus.preservedSubStatus, 'pro');
+  assert.equal(proBonus.isPro, true);
+  assert.equal(proBonus.isPopulaire, false);
+
+  // Cas 1C: Si `boutiques.plan` était vide/`essai` ou `profiles` matché sans `plan`, `patrons` a le vrai forfait `populaire` ou `pro` + date max
+  const staleBtqPopBonus = computePreservedParrainBonusUpdate({
+    boutiquesRow: { id: 'btq_x', referral_code: 'EFA-12345' }, // parrain venu de profiles ou plan null
+    patronsRow: { plan: 'populaire', subscription_status: 'populaire', abonnement_expire: end365 },
+    now: fixedNow,
+  });
+  const staleDays = Math.round((new Date(staleBtqPopBonus.newEndIso).getTime() - fixedNow.getTime()) / 86400000);
+  assert.equal(staleDays, 425, 'Must pick max date from patrons.abonnement_expire + 60j = 425j');
+  assert.equal(staleBtqPopBonus.preservedPlan, 'populaire', 'Must NEVER reset populaire to essai');
+  assert.equal(staleBtqPopBonus.preservedSubStatus, 'populaire');
+
+  const sqlFixSrc = fs.readFileSync('supabase/migrations/20261113_000001_fix_referral_preserve_plan_and_atomic_stock.sql', 'utf8');
+  assert.ok(
+    sqlFixSrc.includes('p_preserved_plan') &&
+      sqlFixSrc.includes('p_preserved_sub_status') &&
+      sqlFixSrc.includes('decrement_product_stock') &&
+      serverSrc.includes('preservedSubStatus') &&
+      serverSrc.includes('subscription_status: preservedSubStatus'),
+    'SQL migration and server.ts must preserve parrain active plan across boutiques & patrons'
+  );
+
+  // 8. BUG 2 : CAISSES BOUTIQUES PRO STRICTEMENT INDÉPENDANTES
+  const vendreSrc = fs.readFileSync('src/components/VendreScreen.tsx', 'utf8');
+  assert.equal(
+    vendreSrc.includes('.eq(\'id\', mainPatronId)'),
+    false,
+    'VendreScreen MUST NEVER update mainPatronId solde during Boutique 2/3 sales'
+  );
+  assert.equal(
+    monArgentSrc.includes('.eq(\'id\', resolvedMainId)'),
+    false,
+    'MonArgentScreen MUST NEVER update resolvedMainId solde during Boutique 2/3 expenses/repayments'
+  );
+  assert.ok(
+    monArgentSrc.includes('remoteVentes !== null ? remoteVentes : localScopedVentes') &&
+      monArgentSrc.includes('remoteCredits !== null ? remoteCredits : localScopedCredits') &&
+      monArgentSrc.includes('remoteDepenses !== null ? remoteDepenses : localScopedDepenses'),
+    'MonArgentScreen must use remote arrays even when empty ([]) and never fall back to mixed props'
+  );
+  const mesVentesSrc = fs.readFileSync('src/components/MesVentesScreen.tsx', 'utf8');
+  assert.ok(
+    mesVentesSrc.includes(".eq('boutique_id', activeBoutiqueId)") &&
+      appSrc.includes('boutiqueId={getActiveBoutiqueId(patron)}'),
+    'MesVentesScreen must strictly filter sales by active boutique_id'
+  );
+  const mesBtqSrc = fs.readFileSync('src/lib/mesBoutiques.ts', 'utf8');
+  assert.ok(mesBtqSrc.includes('solde: 0'), 'createSubBoutique must initialize new store solde to 0');
+
+  // 9. STOCK ATOMIQUE ANTI DOUBLE-VENTE SIMULTANÉE
+  assert.ok(
+    vendreSrc.includes('atomicDecrementProductStock') &&
+      vendreSrc.includes('restoreProductStock') &&
+      appSrc.includes('atomicDecrementProductStock'),
+    'Both VendreScreen and App voice sales must reserve stock atomically'
+  );
+
+  // Simulation réelle de concurrence : 2 vendeurs vendent en même temps le DERNIER 1 article en stock (CAS fallback)
+  let sharedRemoteStock = 1;
+  let acontaMirrorStock = 1;
+  const mockConcurrentSupabase = {
+    from(table: string) {
+      let filterId = '';
+      let filterStock: number | null = null;
+      let pendingUpdate: any = null;
+      const chain: any = {
+        select() {
+          return chain;
+        },
+        update(vals: any) {
+          pendingUpdate = vals;
+          return chain;
+        },
+        eq(col: string, val: any) {
+          if (col === 'id') filterId = val;
+          if (col === 'stock_qte') filterStock = Number(val);
+          return chain;
+        },
+        async maybeSingle() {
+          await new Promise((r) => setTimeout(r, 15)); // Latence réseau simulée pour provoquer la course
+          if (table === 'produits' && filterId === 'prod_race_1') {
+            return { data: { id: 'prod_race_1', stock_qte: sharedRemoteStock, boutique_id: 'btq_sub_2' }, error: null };
+          }
+          return { data: null, error: null };
+        },
+        then(resolve: any) {
+          (async () => {
+            if (pendingUpdate && table === 'produits') {
+              await new Promise((r) => setTimeout(r, 15));
+              if (filterStock === null || sharedRemoteStock === filterStock) {
+                sharedRemoteStock = pendingUpdate.stock_qte;
+                resolve({ data: [{ id: filterId, stock_qte: sharedRemoteStock }], error: null });
+              } else {
+                // Conflit CAS détecté : un autre vendeur a déjà pris le stock !
+                resolve({ data: [], error: null });
+              }
+            } else if (pendingUpdate && table === 'aconta_produits') {
+              acontaMirrorStock = pendingUpdate.stock_qte;
+              resolve({ data: [{ id: filterId, stock_qte: acontaMirrorStock }], error: null });
+            } else {
+              resolve({ data: [], error: null });
+            }
+          })();
+        },
+      };
+      return chain;
+    },
+  };
+
+  await db.produits.put({
+    id: 'prod_race_1',
+    patron_id: 'btq_main',
+    boutique_id: 'btq_sub_2',
+    nom: 'Article Dernier',
+    photo_url: '',
+    prix_achat: 500,
+    prix_vente: 1000,
+    stock_qte: 1,
+    seuil_alerte: 1,
+    created_at: new Date().toISOString(),
+  });
+
+  const [seller1Res, seller2Res] = await Promise.all([
+    atomicDecrementProductStock({
+      productId: 'prod_race_1',
+      boutiqueId: 'btq_sub_2',
+      qty: 1,
+      productName: 'Article Dernier',
+      client: mockConcurrentSupabase,
+    }),
+    atomicDecrementProductStock({
+      productId: 'prod_race_1',
+      boutiqueId: 'btq_sub_2',
+      qty: 1,
+      productName: 'Article Dernier',
+      client: mockConcurrentSupabase,
+    }),
+  ]);
+
+  const successes = [seller1Res, seller2Res].filter((r) => r.success);
+  const failures = [seller1Res, seller2Res].filter((r) => !r.success);
+  assert.equal(successes.length, 1, 'Exactly ONE concurrent seller must succeed on last item');
+  assert.equal(failures.length, 1, 'Exactly ONE concurrent seller must be rejected');
+  assert.equal(sharedRemoteStock, 0, 'Final stock must be 0, never negative or double-sold');
+  assert.equal(acontaMirrorStock, 0, 'aconta_produits mirror stock must also be 0');
+  assert.equal(failures[0].availableStock, 0, 'Rejected seller must be told availableStock = 0');
+
+  // Test aussi via le chemin RPC Postgres atomique
+  let rpcStock = 1;
+  const mockRpcSupabase = {
+    async rpc(_fn: string, args: { p_qty: number }) {
+      if (rpcStock >= args.p_qty) {
+        rpcStock -= args.p_qty;
+        return { data: { success: true, new_stock: rpcStock }, error: null };
+      }
+      return { data: { success: false, available_stock: rpcStock, error: 'Stock insuffisant' }, error: null };
+    },
+  };
+  const [rpc1, rpc2] = await Promise.all([
+    atomicDecrementProductStock({ productId: 'prod_race_1', boutiqueId: 'btq_sub_2', qty: 1, client: mockRpcSupabase }),
+    atomicDecrementProductStock({ productId: 'prod_race_1', boutiqueId: 'btq_sub_2', qty: 1, client: mockRpcSupabase }),
+  ]);
+  assert.equal([rpc1, rpc2].filter((r) => r.success).length, 1, 'RPC atomic path: only 1 seller succeeds');
+  assert.equal([rpc1, rpc2].filter((r) => !r.success).length, 1, 'RPC atomic path: 2nd seller rejected');
+  assert.equal(rpcStock, 0);
 
   console.log('✅ ALL VERIFICATION & REGRESSION TESTS PASSED!');
 }

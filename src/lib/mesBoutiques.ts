@@ -345,6 +345,7 @@ export async function createSubBoutique({
         subscription_end_date: subSubEnd, // Même date d'expiration
         subscription_end: subSubEnd, // Même date d'expiration
         last_payment_amount: 0,
+        solde: 0,
         created_at: nowIso,
         updated_at: nowIso,
       });
@@ -367,6 +368,7 @@ export async function createSubBoutique({
           code_pin: mainPatron.pin_code || mainPatron.code_pin,
           telephone: mainPatron.telephone || '',
           subscription_status: 'pro',
+          solde: 0,
           referred_by: null,
           date_inscription: mainPatron.date_inscription || mainPatron.created_at || nowIso,
           is_active: true,

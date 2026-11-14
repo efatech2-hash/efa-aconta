@@ -192,6 +192,7 @@ export interface Parrainage {
 export interface LogSuppression {
   id: string;
   patron_id: string;
+  boutique_id?: string;
   vente_id: string;
   ticket_id?: string;
   produit_nom: string;

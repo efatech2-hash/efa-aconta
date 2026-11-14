@@ -448,3 +448,222 @@ export async function upsertProduitSafely(
 
   return { error: res.error, resolvedPatronId: finalPatronId };
 }
+
+export interface AtomicStockResult {
+  success: boolean;
+  newStock?: number;
+  availableStock?: number;
+  error?: string;
+  offlineQueued?: boolean;
+}
+
+/**
+ * Décrémente atomiquement le stock d'un produit lors d'une vente.
+ * 1) Utilise en priorité le RPC SQL `decrement_product_stock` (verrouillage atomique Postgres WHERE stock_qte >= qty).
+ * 2) En fallback si le RPC n'est pas encore déployé, exécute un Compare-And-Swap optimiste
+ *    (.update({ stock_qte: fresh - qty }).eq('id', id).eq('stock_qte', fresh).select('id, stock_qte'))
+ *    jusqu'à 4 tentatives pour empêcher deux vendeurs simultanés de vendre le dernier article en double.
+ * 3) Scopé strictement à la boutique active (boutique_id).
+ */
+export async function atomicDecrementProductStock(params: {
+  productId: string;
+  boutiqueId: string;
+  qty: number;
+  productName?: string;
+  client?: any;
+}): Promise<AtomicStockResult> {
+  const { productId, boutiqueId, qty, productName } = params;
+  const client = params.client || supabase;
+  const needed = Math.max(0, Math.floor(Number(qty) || 0));
+
+  if (!productId || needed <= 0) {
+    return { success: false, error: 'Quantité de vente invalide.' };
+  }
+
+  const label = productName ? `"${productName}"` : 'ce produit';
+  const isOnline =
+    typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean'
+      ? navigator.onLine
+      : true;
+
+  if (isOnline && client) {
+    // Tentative 1 : RPC atomique Postgres (decrement_product_stock)
+    try {
+      if (typeof client.rpc === 'function') {
+        const rpcRes: any = await withTimeout(
+          client.rpc('decrement_product_stock', {
+            p_product_id: productId,
+            p_boutique_id: boutiqueId,
+            p_qty: needed,
+          }),
+          4500
+        );
+
+        if (!rpcRes?.error && rpcRes?.data) {
+          const payload = typeof rpcRes.data === 'string' ? JSON.parse(rpcRes.data) : rpcRes.data;
+          if (payload?.success === true && typeof payload.new_stock === 'number') {
+            try {
+              await db.produits.update(productId, { stock_qte: payload.new_stock });
+            } catch {}
+            return { success: true, newStock: payload.new_stock };
+          }
+          if (payload?.success === false) {
+            const avail = typeof payload.available_stock === 'number' ? payload.available_stock : 0;
+            if (typeof payload.available_stock === 'number') {
+              try {
+                await db.produits.update(productId, { stock_qte: avail });
+              } catch {}
+            }
+            return {
+              success: false,
+              availableStock: avail,
+              error: `Stock insuffisant pour ${label} (${avail} restant${avail > 1 ? 's' : ''}, ${needed} demandé${needed > 1 ? 's' : ''}).`,
+            };
+          }
+        }
+      }
+    } catch {
+      // RPC absent ou timeout -> passage au Compare-And-Swap optimiste
+    }
+
+    // Tentative 2 : Compare-And-Swap optimiste multi-tentatives via PostgREST
+    const maxAttempts = 4;
+    let shouldFallbackOffline = false;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const readRes: any = await withTimeout(
+          client
+            .from('produits')
+            .select('id, stock_qte, boutique_id, patron_id')
+            .eq('id', productId)
+            .maybeSingle(),
+          4000
+        );
+
+        if (readRes?.error || !readRes?.data) {
+          shouldFallbackOffline = true;
+          break;
+        }
+
+        const remoteProd = readRes.data;
+        const freshStock = Math.max(0, Number(remoteProd.stock_qte) || 0);
+
+        if (freshStock < needed) {
+          try {
+            await db.produits.update(productId, { stock_qte: freshStock });
+          } catch {}
+          return {
+            success: false,
+            availableStock: freshStock,
+            error: `Stock insuffisant pour ${label} (${freshStock} restant${freshStock > 1 ? 's' : ''}, ${needed} demandé${needed > 1 ? 's' : ''}).`,
+          };
+        }
+
+        const targetStock = freshStock - needed;
+        let updateQuery = client
+          .from('produits')
+          .update({ stock_qte: targetStock })
+          .eq('id', productId)
+          .eq('stock_qte', freshStock);
+
+        if (boutiqueId && remoteProd.boutique_id) {
+          updateQuery = updateQuery.eq('boutique_id', boutiqueId);
+        }
+
+        const updateRes: any = await withTimeout(updateQuery.select('id, stock_qte'), 4000);
+
+        if (!updateRes?.error && Array.isArray(updateRes?.data) && updateRes.data.length > 0) {
+          const confirmedStock = Number(updateRes.data[0]?.stock_qte ?? targetStock);
+          // Miroir aconta_produits sans bloquer
+          try {
+            await withTimeout(
+              client.from('aconta_produits').update({ stock_qte: confirmedStock }).eq('id', productId),
+              3000
+            );
+          } catch {}
+          try {
+            await db.produits.update(productId, { stock_qte: confirmedStock });
+          } catch {}
+          return { success: true, newStock: confirmedStock };
+        }
+
+        // 0 lignes modifiées = un autre vendeur vient de modifier stock_qte en même temps -> on réessaie avec la valeur fraîche
+      } catch {
+        shouldFallbackOffline = true;
+        break;
+      }
+    }
+
+    if (!shouldFallbackOffline) {
+      return {
+        success: false,
+        error: `Conflit de stock concurrent pour ${label}. Veuillez réessayer.`,
+      };
+    }
+  }
+
+  // Fallback hors-ligne (ou indisponibilité réseau) transactionnel sur la base locale Dexie
+  try {
+    return await db.transaction('rw', db.produits, async () => {
+      const localProd = await db.produits.get(productId);
+      const localStock = Math.max(0, Number(localProd?.stock_qte) || 0);
+      if (localProd && localStock < needed) {
+        return {
+          success: false,
+          availableStock: localStock,
+          error: `Stock insuffisant pour ${label} (${localStock} restant${localStock > 1 ? 's' : ''}).`,
+        };
+      }
+      const newLocalStock = Math.max(0, localStock - needed);
+      if (localProd) {
+        await db.produits.update(productId, { stock_qte: newLocalStock });
+      }
+      return { success: true, newStock: newLocalStock, offlineQueued: true };
+    });
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Erreur lors de la vérification du stock.' };
+  }
+}
+
+/**
+ * Restaure une quantité de stock (rollback si un autre article du panier échoue à la réservation atomique).
+ */
+export async function restoreProductStock(params: {
+  productId: string;
+  boutiqueId: string;
+  qty: number;
+  client?: any;
+}): Promise<void> {
+  const { productId, boutiqueId, qty } = params;
+  const client = params.client || supabase;
+  const addQty = Math.max(0, Math.floor(Number(qty) || 0));
+  if (!productId || addQty <= 0) return;
+
+  try {
+    const localProd = await db.produits.get(productId);
+    let restoredStock = (Number(localProd?.stock_qte) || 0) + addQty;
+
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      const { data: remoteProd } = await client
+        .from('produits')
+        .select('stock_qte, boutique_id')
+        .eq('id', productId)
+        .maybeSingle();
+      if (remoteProd && typeof remoteProd.stock_qte === 'number') {
+        restoredStock = remoteProd.stock_qte + addQty;
+        let upd = client.from('produits').update({ stock_qte: restoredStock }).eq('id', productId);
+        if (boutiqueId && remoteProd.boutique_id) {
+          upd = upd.eq('boutique_id', boutiqueId);
+        }
+        await upd;
+        try {
+          await client.from('aconta_produits').update({ stock_qte: restoredStock }).eq('id', productId);
+        } catch {}
+      }
+    }
+
+    if (localProd) {
+      await db.produits.update(productId, { stock_qte: restoredStock });
+    }
+  } catch {}
+}

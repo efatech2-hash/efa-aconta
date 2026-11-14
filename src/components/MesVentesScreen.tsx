@@ -4,10 +4,12 @@ import type { Vente, CurrentUser } from '../lib/types';
 import { getAccord } from '../lib/accord';
 import { BoutonRetour } from './BoutonRetour';
 import { supabase } from '../lib/supabase';
+import { getActiveBoutiqueId } from '../lib/deviceAuth';
 
 interface MesVentesScreenProps {
   currentUser: CurrentUser;
   ventes: Vente[];
+  boutiqueId?: string;
   onBack: () => void;
 }
 
@@ -25,20 +27,27 @@ function isDateToday(dateStr: string): boolean {
 export const MesVentesScreen: React.FC<MesVentesScreenProps> = ({
   currentUser,
   ventes,
+  boutiqueId,
   onBack,
 }) => {
   const accord = getAccord(currentUser.genre);
   const [remoteSales, setRemoteSales] = useState<Vente[] | null>(null);
+  const activeBoutiqueId = boutiqueId || getActiveBoutiqueId();
 
-  // Charger directement les ventes depuis Supabase pour cet employé
+  // Charger directement les ventes depuis Supabase pour cet employé dans la boutique active
   const fetchMySales = async () => {
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
-        const { data, error } = await supabase
+        let query = supabase
           .from('ventes')
           .select('*')
-          .or(`vendu_par_id.eq.${currentUser.id},employee_id.eq.${currentUser.id}`)
-          .order('date', { ascending: false });
+          .or(`vendu_par_id.eq.${currentUser.id},employee_id.eq.${currentUser.id}`);
+
+        if (activeBoutiqueId) {
+          query = query.eq('boutique_id', activeBoutiqueId);
+        }
+
+        const { data, error } = await query.order('date', { ascending: false });
 
         if (!error && data) {
           setRemoteSales(data.map((v) => ({
@@ -68,11 +77,12 @@ export const MesVentesScreen: React.FC<MesVentesScreenProps> = ({
   };
 
   useEffect(() => {
+    setRemoteSales(null);
     fetchMySales();
 
     // Abonnement Supabase Realtime
     const channel = supabase
-      .channel(`mes_ventes_realtime_${currentUser.id}`)
+      .channel(`mes_ventes_realtime_${currentUser.id}_${activeBoutiqueId}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'ventes' },
@@ -85,12 +95,13 @@ export const MesVentesScreen: React.FC<MesVentesScreenProps> = ({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [currentUser.id]);
+  }, [currentUser.id, activeBoutiqueId]);
 
-  // Ventes du jour actives de l'employé
+  // Ventes du jour actives de l'employé pour la boutique active
   const activeSalesSource = remoteSales !== null ? remoteSales : ventes;
   const mySalesToday = activeSalesSource.filter(
     (v) =>
+      (!activeBoutiqueId || (v.boutique_id ? v.boutique_id === activeBoutiqueId : v.patron_id === activeBoutiqueId)) &&
       (v.vendu_par_id === currentUser.id || (v as any).employee_id === currentUser.id) &&
       isDateToday(v.date) &&
       (v as any).status !== 'supprimée' &&

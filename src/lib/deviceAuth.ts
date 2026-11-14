@@ -347,6 +347,7 @@ export async function createBoutique({
       subscription_end_date: trialEndIso,
       subscription_end: trialEndIso,
       last_payment_amount: 0,
+      solde: 0,
       created_at: nowIso,
       updated_at: nowIso,
     };

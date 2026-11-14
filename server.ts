@@ -1022,25 +1022,72 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
                   .eq('id', parrRows[0].id);
               }
 
-              // Extension +60 jours pour le PARRAIN SEUL (jamais le filleul)
-              const { data: parrainBtq } = await supabase
-                .from('boutiques')
-                .select('subscription_end, subscription_end_date, plan')
-                .eq('id', parrainId)
-                .maybeSingle();
+              // Extension +60 jours pour le PARRAIN SEUL (jamais le filleul), EN CONSERVANT SON PLAN ACTUEL
+              const [{ data: parrainBtq }, { data: parrainPat }] = await Promise.all([
+                supabase
+                  .from('boutiques')
+                  .select('subscription_end, subscription_end_date, plan, last_payment_amount')
+                  .eq('id', parrainId)
+                  .maybeSingle(),
+                supabase
+                  .from('patrons')
+                  .select('subscription_end, subscription_end_date, fin_abonnement, abonnement_expire, plan, forfait, subscription_status, last_payment_amount')
+                  .eq('id', parrainId)
+                  .maybeSingle(),
+              ]);
+
               const now = new Date();
               let pBase = now;
-              const pEnd = parrainBtq?.subscription_end_date || parrainBtq?.subscription_end;
-              if (pEnd && new Date(pEnd) > now) pBase = new Date(pEnd);
+              for (const rawEnd of [
+                parrainBtq?.subscription_end_date,
+                parrainBtq?.subscription_end,
+                parrainPat?.subscription_end_date,
+                parrainPat?.subscription_end,
+                parrainPat?.fin_abonnement,
+                parrainPat?.abonnement_expire,
+              ]) {
+                if (!rawEnd) continue;
+                const d = new Date(rawEnd);
+                if (!isNaN(d.getTime()) && d > pBase) pBase = d;
+              }
               const pNewEnd = new Date(pBase.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
 
-              const pRawPlan = (parrainBtq?.plan || '').toLowerCase();
-              const preservedParrainPlan =
-                pRawPlan.includes('populaire') || pRawPlan.includes('16500') || pRawPlan.includes('prolonge')
-                  ? 'populaire'
-                  : pRawPlan.includes('pro')
-                  ? parrainBtq?.plan || 'pro'
-                  : pRawPlan || 'essai';
+              const planCandidates = [
+                parrainBtq?.plan,
+                parrainPat?.plan,
+                parrainPat?.forfait,
+                parrainPat?.subscription_status,
+              ]
+                .map((v) => (typeof v === 'string' ? v.trim() : ''))
+                .filter(Boolean);
+              const paidPlanCandidate = planCandidates.find((p) => {
+                const low = p.toLowerCase();
+                return low !== 'essai' && low !== 'trial' && low !== 'expired';
+              });
+              const pRawPlan = (paidPlanCandidate || planCandidates[0] || '').toLowerCase();
+              const maxAmt = Math.max(
+                Number(parrainBtq?.last_payment_amount) || 0,
+                Number(parrainPat?.last_payment_amount) || 0
+              );
+
+              const isParrainPopulaire =
+                pRawPlan.includes('populaire') ||
+                pRawPlan.includes('16500') ||
+                pRawPlan.includes('prolonge') ||
+                (maxAmt === 16500 && !pRawPlan.includes('pro'));
+              const isParrainPro =
+                !isParrainPopulaire &&
+                (pRawPlan === 'pro' ||
+                  pRawPlan.startsWith('pro_') ||
+                  (pRawPlan.includes('pro') && !pRawPlan.includes('prolonge')) ||
+                  maxAmt >= 50000);
+
+              const preservedParrainPlan = isParrainPopulaire
+                ? 'populaire'
+                : isParrainPro
+                ? (paidPlanCandidate && paidPlanCandidate.toLowerCase().includes('pro') ? paidPlanCandidate : 'pro')
+                : 'essai';
+              const preservedSubStatus = isParrainPopulaire ? 'populaire' : isParrainPro ? 'pro' : 'trial';
 
               await supabase
                 .from('boutiques')
@@ -1053,6 +1100,21 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
                   updated_at: rewardNowIso,
                 })
                 .eq('id', parrainId);
+
+              if (isParrainPro) {
+                await supabase
+                  .from('boutiques')
+                  .update({
+                    subscription_end: pNewEnd,
+                    subscription_end_date: pNewEnd,
+                    plan: preservedParrainPlan,
+                    is_active: true,
+                    status: 'active',
+                    updated_at: rewardNowIso,
+                  })
+                  .eq('patron_id', parrainId);
+              }
+
               await supabase.from('profiles').update({ subscription_end_date: pNewEnd }).eq('id', parrainId);
               await supabase
                 .from('patrons')
@@ -1061,6 +1123,9 @@ app.post('/api/admin/boutiques/activate', requireAdminAuth, async (req: Request,
                   subscription_end_date: pNewEnd,
                   fin_abonnement: pNewEnd,
                   abonnement_expire: pNewEnd,
+                  subscription_status: preservedSubStatus,
+                  plan: preservedParrainPlan,
+                  forfait: preservedParrainPlan,
                   is_active: true,
                   statut: 'ACTIF',
                 })

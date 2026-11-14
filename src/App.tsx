@@ -52,6 +52,7 @@ import {
   buildDepenseSupabasePayload,
   safeSupabaseWrite,
   upsertProduitSafely,
+  atomicDecrementProductStock,
 } from './lib/supabaseHelper';
 import CheckAbonnement from './components/CheckAbonnement';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
@@ -415,21 +416,69 @@ export default function App() {
             if (rp) remotePatron = rp;
           } catch {}
 
-          if (bDataRecord) {
-            const rawPlan = (bDataRecord.plan || bDataRecord.forfait || '').toLowerCase().trim();
-            const rawStatus = (bDataRecord.status || bDataRecord.statut || '').toLowerCase().trim();
-            const subEndDate = bDataRecord.subscription_end_date || bDataRecord.subscription_end || bDataRecord.fin_abonnement;
-            const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
-            const isPopulaire =
+          const pickLatestDate = (...candidates: any[]): string | undefined => {
+            let bestDate: Date | null = null;
+            let bestRaw: string | undefined;
+            for (const c of candidates) {
+              if (!c || typeof c !== 'string') continue;
+              const d = new Date(c);
+              if (!isNaN(d.getTime()) && (!bestDate || d > bestDate)) {
+                bestDate = d;
+                bestRaw = c;
+              }
+            }
+            return bestRaw;
+          };
+
+          const classifyRemotePlan = (row1?: any, row2?: any) => {
+            const candidates = [
+              row1?.plan,
+              row1?.forfait,
+              row2?.plan,
+              row2?.forfait,
+              row2?.subscription_status,
+            ]
+              .map((v) => (typeof v === 'string' ? v.trim() : ''))
+              .filter(Boolean);
+            const paidCandidate = candidates.find((p) => {
+              const low = p.toLowerCase();
+              return low !== 'essai' && low !== 'trial' && low !== 'expired';
+            });
+            const rawPlan = (paidCandidate || candidates[0] || '').toLowerCase();
+            const maxAmt = Math.max(
+              Number(row1?.last_payment_amount) || 0,
+              Number(row2?.last_payment_amount) || 0
+            );
+            const isPop =
               rawPlan === 'populaire' ||
               rawPlan.includes('populaire') ||
               rawPlan.includes('16500') ||
-              rawPlan.includes('prolonge');
-            const isPro =
-              !isPopulaire &&
+              rawPlan.includes('prolonge') ||
+              (maxAmt === 16500 && !rawPlan.includes('pro'));
+            const isPr =
+              !isPop &&
               (rawPlan === 'pro' ||
+                rawPlan.startsWith('pro_') ||
                 (rawPlan.includes('pro') && !rawPlan.includes('prolonge')) ||
-                Number(bDataRecord.last_payment_amount) >= 50000);
+                row1?.isProActive === true ||
+                row2?.isProActive === true ||
+                maxAmt >= 50000);
+            return { isPopulaire: isPop, isPro: isPr, rawPlan: paidCandidate || candidates[0] || 'essai' };
+          };
+
+          if (bDataRecord) {
+            const { isPopulaire, isPro, rawPlan: bestPlanRaw } = classifyRemotePlan(bDataRecord, remotePatron);
+            const rawStatus = (bDataRecord.status || bDataRecord.statut || '').toLowerCase().trim();
+            const subEndDate = pickLatestDate(
+              bDataRecord.subscription_end_date,
+              bDataRecord.subscription_end,
+              bDataRecord.fin_abonnement,
+              remotePatron?.subscription_end_date,
+              remotePatron?.subscription_end,
+              remotePatron?.fin_abonnement,
+              remotePatron?.abonnement_expire
+            );
+            const isStatusActive = rawStatus === 'active' || rawStatus === 'actif' || rawStatus === '';
 
             const converted = boutiqueToPatron(bDataRecord);
             const mainDateInscription =
@@ -483,10 +532,12 @@ export default function App() {
                 trial_start_date: mainDateInscription,
                 subscription_status: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.subscription_status,
                 current_plan: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.current_plan,
+                forfait: isPopulaire ? 'populaire' : isPro ? bestPlanRaw : converted.forfait,
                 isProActive: isPro,
                 statut: isStatusActive ? 'ACTIF' : currentPatron.statut,
                 subscription_end_date: subEndDate || currentPatron.subscription_end_date,
                 abonnement_expire: subEndDate || currentPatron.abonnement_expire,
+                fin_abonnement: subEndDate || currentPatron.fin_abonnement,
                 pin_code: currentPatron.pin_code || converted.pin_code,
                 code_pin: currentPatron.code_pin || converted.code_pin,
               };
@@ -504,6 +555,10 @@ export default function App() {
                 trial_start_date: mainDateInscription,
                 subscription_status: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.subscription_status,
                 current_plan: isPro ? 'pro' : isPopulaire ? 'populaire' : converted.current_plan,
+                forfait: isPopulaire ? 'populaire' : isPro ? bestPlanRaw : converted.forfait,
+                subscription_end_date: subEndDate || converted.subscription_end_date,
+                abonnement_expire: subEndDate || converted.abonnement_expire,
+                fin_abonnement: subEndDate || converted.fin_abonnement,
                 isProActive: isPro,
               };
             }
@@ -517,6 +572,17 @@ export default function App() {
             const freshPatronPhoto = remotePatron.photo_url || remotePatron.photo_profil || undefined;
             const freshReferralCode = remotePatron.code_parrainage || remotePatron.referral_code || undefined;
             const mainDateInscription = remotePatron.date_inscription || remotePatron.created_at || currentPatron?.date_inscription;
+            const { isPopulaire: rIsPop, isPro: rIsPro, rawPlan: rRawPlan } = classifyRemotePlan(remotePatron, currentPatron);
+            const rSubEnd = pickLatestDate(
+              remotePatron.subscription_end_date,
+              remotePatron.subscription_end,
+              remotePatron.fin_abonnement,
+              remotePatron.abonnement_expire,
+              currentPatron?.subscription_end_date,
+              currentPatron?.abonnement_expire
+            );
+            const rSubStatus: 'trial' | 'populaire' | 'pro' = rIsPro ? 'pro' : rIsPop ? 'populaire' : 'trial';
+
             if (currentPatron) {
               currentPatron = {
                 ...currentPatron,
@@ -534,7 +600,13 @@ export default function App() {
                 pin_code: realPin !== undefined ? realPin : currentPatron.pin_code,
                 code_pin: realPin !== undefined ? realPin : currentPatron.code_pin,
                 pin_hash: remotePatron.pin_hash || currentPatron.pin_hash,
-                abonnement_expire: remotePatron.abonnement_expire || currentPatron.abonnement_expire,
+                abonnement_expire: rSubEnd || remotePatron.abonnement_expire || currentPatron.abonnement_expire,
+                subscription_end_date: rSubEnd || currentPatron.subscription_end_date,
+                fin_abonnement: rSubEnd || currentPatron.fin_abonnement,
+                subscription_status: rSubStatus !== 'trial' ? rSubStatus : currentPatron.subscription_status,
+                current_plan: rSubStatus !== 'trial' ? rSubStatus : currentPatron.current_plan,
+                forfait: rSubStatus !== 'trial' ? rRawPlan : currentPatron.forfait,
+                isProActive: rIsPro || Boolean(currentPatron.isProActive),
               };
             } else {
               currentPatron = {
@@ -559,10 +631,16 @@ export default function App() {
                 role: 'patron',
                 solde: Number(remotePatron.solde) || 0,
                 abonnement_expire:
+                  rSubEnd ||
                   remotePatron.abonnement_expire ||
                   remotePatron.subscription_end_date ||
                   new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString(),
-                subscription_status: 'trial',
+                subscription_end_date: rSubEnd,
+                fin_abonnement: rSubEnd,
+                subscription_status: rSubStatus,
+                current_plan: rSubStatus,
+                forfait: rSubStatus !== 'trial' ? rRawPlan : 'essai',
+                isProActive: rIsPro,
                 created_at: remotePatron.created_at || new Date().toISOString(),
               };
             }
@@ -582,19 +660,39 @@ export default function App() {
         const now = new Date();
         let patronNeedsUpdate = false;
 
+        const lowStatus = String(currentPatron.subscription_status || '').toLowerCase();
+        const lowPlan = String(currentPatron.current_plan || '').toLowerCase();
+        const lowForfait = String(currentPatron.forfait || '').toLowerCase();
+        const isPopulaireActive =
+          lowStatus.includes('populaire') ||
+          lowPlan.includes('populaire') ||
+          lowForfait.includes('populaire') ||
+          lowForfait.includes('16500') ||
+          lowStatus.includes('prolonge') ||
+          lowPlan.includes('prolonge') ||
+          lowForfait.includes('prolonge');
+        const isProActiveFlag =
+          !isPopulaireActive &&
+          (currentPatron.isProActive ||
+            lowStatus === 'pro' ||
+            lowStatus.startsWith('pro_') ||
+            lowPlan === 'pro' ||
+            lowPlan.startsWith('pro_') ||
+            (lowForfait.includes('pro') && !lowForfait.includes('prolonge')));
+
         // RÈGLE : Si PRO actif ou POPULAIRE actif, ne JAMAIS forcer trial !
-        if (currentPatron.isProActive || currentPatron.subscription_status === 'pro') {
+        if (isProActiveFlag) {
           currentPatron.subscription_status = 'pro';
           currentPatron.current_plan = 'pro';
           currentPatron.isProActive = true;
           currentPatron.statut = 'ACTIF';
-        } else if (currentPatron.subscription_status === 'populaire') {
+        } else if (isPopulaireActive) {
           currentPatron.subscription_status = 'populaire';
           currentPatron.current_plan = 'populaire';
           currentPatron.isProActive = false;
           currentPatron.statut = 'ACTIF';
         } else {
-          // Calcul strict des 21 jours d'essai depuis patrons.date_inscription (jamais depuis boutique secondaire)
+          // Calcul strict des 21 jours d'essai depuis patrons.date_inscription (et respecter tout bonus +60j déjà accordé)
           const inscriptionSource =
             currentPatron.date_inscription ||
             currentPatron.trial_start_date ||
@@ -602,11 +700,16 @@ export default function App() {
             new Date().toISOString();
           const created = new Date(inscriptionSource);
           const trialEnd = new Date(created.getTime() + 21 * 24 * 60 * 60 * 1000);
+          const existingSubEnd = currentPatron.subscription_end_date ? new Date(currentPatron.subscription_end_date) : null;
+          const effectiveTrialEnd =
+            existingSubEnd && !isNaN(existingSubEnd.getTime()) && existingSubEnd > trialEnd
+              ? existingSubEnd
+              : trialEnd;
           currentPatron.date_inscription = created.toISOString();
           currentPatron.trial_start_date = created.toISOString();
-          currentPatron.trial_end_date = trialEnd.toISOString();
-          currentPatron.subscription_end_date = currentPatron.subscription_end_date || trialEnd.toISOString();
-          if (now > trialEnd) {
+          currentPatron.trial_end_date = effectiveTrialEnd.toISOString();
+          currentPatron.subscription_end_date = currentPatron.subscription_end_date || effectiveTrialEnd.toISOString();
+          if (now > effectiveTrialEnd) {
             currentPatron.subscription_status = 'expired';
             patronNeedsUpdate = true;
           } else if (currentPatron.subscription_status !== 'trial') {
@@ -1307,13 +1410,30 @@ export default function App() {
 
       if (action.type === 'vente') {
         const saleData = action.data;
+        // RÈGLE : Réservation atomique du stock AVANT toute écriture vente/caisse
+        const stockRes = await atomicDecrementProductStock({
+          productId: saleData.produit_id,
+          boutiqueId: activeBoutiqueId,
+          qty: Number(saleData.qte) || 1,
+          productName: saleData.produit_nom,
+        });
+        if (!stockRes.success) {
+          const errMsg = stockRes.error || `Stock insuffisant pour ${saleData.produit_nom}.`;
+          showToast(errMsg, 'warning');
+          speakFrench(errMsg);
+          await loadDatabase();
+          return;
+        }
+
         // RÈGLE : ID unique neuf avec crypto.randomUUID()
         const saleId = generatePrefixedId('vte');
         const nowIso = new Date().toISOString();
         const saleRecord: Vente = { id: saleId, patron_id: mainPatronId, boutique_id: activeBoutiqueId, produit_id: saleData.produit_id, produit_nom: saleData.produit_nom, qte: saleData.qte, montant_total: saleData.montant_total, client_nom: saleData.client_nom, est_credit: saleData.est_credit, reste_a_payer: saleData.reste_a_payer, vendu_par_id: currentUser.id, employee_id: currentUser.role === 'patron' ? null : currentUser.id, vendu_par_nom: currentUser.nom, vendu_par_genre: currentUser.genre, date: nowIso, synced: isOnlineNow };
 
         const currentProd = products.find((p) => p.id === saleData.produit_id);
-        const newStock = Math.max(0, (currentProd?.stock_qte ?? 0) - saleData.qte);
+        const newStock = typeof stockRes.newStock === 'number'
+          ? stockRes.newStock
+          : Math.max(0, (currentProd?.stock_qte ?? 0) - saleData.qte);
         const rowTx = {
           id: saleId,
           ticket_id: saleId,
@@ -1335,7 +1455,6 @@ export default function App() {
         let venteSaved = false;
         if (isOnlineNow) {
           try {
-            await supabase.from('produits').update({ stock_qte: newStock }).eq('id', saleData.produit_id);
             const resVente: any = await supabase.from('ventes').upsert([{ ...saleRecord, boutique_id: activeBoutiqueId }], { onConflict: 'id' });
             if (resVente?.status === 409 || resVente?.error?.code === '23505') {
               console.log('[Sync 409 Déjà présent]', 'ventes', saleId);
@@ -1356,7 +1475,9 @@ export default function App() {
           saleRecord.synced = false;
           await queueSyncItem('ventes', 'insert', saleId, { ...saleRecord, boutique_id: activeBoutiqueId });
           await queueSyncItem('transactions', 'insert', saleId, rowTx);
-          await queueSyncItem('produits', 'update', saleData.produit_id, { stock_qte: newStock });
+          if (stockRes.offlineQueued || !isOnlineNow) {
+            await queueSyncItem('produits', 'update', saleData.produit_id, { stock_qte: newStock });
+          }
         }
 
         await db.ventes.put(saleRecord);
@@ -1413,6 +1534,35 @@ export default function App() {
           }
           await db.credits.put(creditRecord);
         }
+
+        // CAISSE INDÉPENDANTE : Mise à jour STRICTEMENT sur activeBoutiqueId
+        const cashReceived = saleData.est_credit
+          ? Math.max(0, (Number(saleData.montant_total) || 0) - (Number(saleData.reste_a_payer) || 0))
+          : (Number(saleData.montant_total) || 0);
+        if (cashReceived > 0) {
+          let newVoiceSolde = (Number(patron.solde) || 0) + cashReceived;
+          if (isOnlineNow) {
+            try {
+              const { data: btqData } = await supabase.from('boutiques').select('solde').eq('id', activeBoutiqueId).maybeSingle();
+              let curS = btqData?.solde !== null && btqData?.solde !== undefined && !isNaN(Number(btqData.solde))
+                ? Number(btqData.solde)
+                : NaN;
+              if (isNaN(curS)) {
+                const { data: pData } = await supabase.from('patrons').select('solde').eq('id', activeBoutiqueId).maybeSingle();
+                curS = pData?.solde !== null && pData?.solde !== undefined && !isNaN(Number(pData.solde)) ? Number(pData.solde) : 0;
+              }
+              newVoiceSolde = curS + cashReceived;
+              await supabase.from('boutiques').update({ solde: newVoiceSolde }).eq('id', activeBoutiqueId);
+              await supabase.from('patrons').update({ solde: newVoiceSolde }).eq('id', activeBoutiqueId);
+            } catch {}
+          }
+          patron.solde = newVoiceSolde;
+          try {
+            await db.patrons.update(activeBoutiqueId, { solde: newVoiceSolde });
+            if (patron.id !== activeBoutiqueId) await db.patrons.update(patron.id, { solde: newVoiceSolde });
+          } catch {}
+        }
+
         await logAction({ patron_id: mainPatronId, boutique_id: activeBoutiqueId, user_id: currentUser.id, employe_id: currentUser.role === 'patron' ? null : currentUser.id, employe_nom: currentUser.role === 'patron' ? undefined : (currentUser.prenom || currentUser.nom), action_type: 'vente', description: `Vente vocale ${saleData.qte}x ${saleData.produit_nom} (${saleData.montant_total}F) par ${currentUser.role === 'patron' ? 'Patron' : (currentUser.prenom || currentUser.nom)}`, montant: saleData.montant_total }).catch(console.error);
         await loadDatabase(); triggerPostActionPrompt();
       } else if (action.type === 'depense') {
@@ -1465,6 +1615,26 @@ export default function App() {
                 txSaved = true;
               }
             } catch {}
+            // CAISSE INDÉPENDANTE : Déduire STRICTEMENT sur activeBoutiqueId
+            const depAmount = Number(depData.montant) || 0;
+            if (depAmount > 0) {
+              const { data: btqData } = await supabase.from('boutiques').select('solde').eq('id', activeBoutiqueId).maybeSingle();
+              let curS = btqData?.solde !== null && btqData?.solde !== undefined && !isNaN(Number(btqData.solde))
+                ? Number(btqData.solde)
+                : NaN;
+              if (isNaN(curS)) {
+                const { data: pData } = await supabase.from('patrons').select('solde').eq('id', activeBoutiqueId).maybeSingle();
+                curS = pData?.solde !== null && pData?.solde !== undefined && !isNaN(Number(pData.solde)) ? Number(pData.solde) : 0;
+              }
+              const newVoiceSolde = Math.max(0, curS - depAmount);
+              await supabase.from('boutiques').update({ solde: newVoiceSolde }).eq('id', activeBoutiqueId);
+              await supabase.from('patrons').update({ solde: newVoiceSolde }).eq('id', activeBoutiqueId);
+              patron.solde = newVoiceSolde;
+              try {
+                await db.patrons.update(activeBoutiqueId, { solde: newVoiceSolde });
+                if (patron.id !== activeBoutiqueId) await db.patrons.update(patron.id, { solde: newVoiceSolde });
+              } catch {}
+            }
           } catch {
             // ignore
           }
@@ -1648,7 +1818,7 @@ export default function App() {
           {activeTab === 'ambassadrice' && currentUser && currentUser.role === 'patron' && <AmbassadriceScreen patron={patron} parrainages={parrainages} onBack={() => setActiveTab('home')} onRefresh={loadDatabase} onPreviewInvite={(slug) => setPreviewInviteSlug(slug)} />}
           {activeTab === 'historique' && currentUser && currentUser.role === 'patron' && <HistoriqueScreen patron={patron} employes={employes} onBack={() => setActiveTab('home')} onOpenSubscriptionModal={handleOpenSubscriptionModal} />}
           {activeTab === 'mon-abonnement' && currentUser && currentUser.role === 'patron' && patron && <MonAbonnementScreen patron={patron} onBack={() => handleNavigate('home')} onOpenSubscriptionModal={handleOpenSubscriptionModal} onRefreshPatron={loadDatabase} />}
-          {activeTab === 'mes-ventes' && currentUser && <MesVentesScreen currentUser={currentUser} ventes={ventes} onBack={() => setActiveTab('home')} />}
+          {activeTab === 'mes-ventes' && currentUser && <MesVentesScreen currentUser={currentUser} ventes={ventes} boutiqueId={getActiveBoutiqueId(patron)} onBack={() => setActiveTab('home')} />}
           {activeTab === 'mes-boutiques' && currentUser && currentUser.role === 'patron' && (
             <MesBoutiquesScreen
               patron={patron}

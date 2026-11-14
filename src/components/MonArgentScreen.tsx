@@ -92,10 +92,11 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
           .select('solde')
           .eq('id', targetStoreId)
           .maybeSingle();
-        if (btq && typeof btq.solde === 'number') {
-          setRemoteSolde(btq.solde);
-          patron.solde = btq.solde;
-          await db.patrons.update(patron.id, { solde: btq.solde });
+        if (btq && btq.solde !== null && btq.solde !== undefined && !isNaN(Number(btq.solde))) {
+          const parsedSolde = Number(btq.solde);
+          setRemoteSolde(parsedSolde);
+          patron.solde = parsedSolde;
+          await db.patrons.update(targetStoreId, { solde: parsedSolde }).catch(() => {});
           return;
         }
         const { data: p } = await supabase
@@ -103,23 +104,30 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
           .select('solde')
           .eq('id', targetStoreId)
           .maybeSingle();
-        if (p && typeof p.solde === 'number') {
-          setRemoteSolde(p.solde);
-          patron.solde = p.solde;
-          await db.patrons.update(patron.id, { solde: p.solde });
+        if (p && p.solde !== null && p.solde !== undefined && !isNaN(Number(p.solde))) {
+          const parsedSolde = Number(p.solde);
+          setRemoteSolde(parsedSolde);
+          patron.solde = parsedSolde;
+          await db.patrons.update(targetStoreId, { solde: parsedSolde }).catch(() => {});
           return;
         }
+        // Aucune colonne solde renseignée pour cette boutique -> calcul local scopé boutique
+        setRemoteSolde(null);
       } catch (err) {
         console.warn('Erreur chargement solde Supabase:', err);
       }
     }
   };
 
-  // Charger les logs de suppression
+  // Charger les logs de suppression scopés à la boutique active
   const loadLogs = async () => {
     try {
-      const logs = await db.logsSuppression.where('patron_id').equals(patron.id).reverse().sortBy('date');
-      setLogsList(logs);
+      const targetBtqId = getActiveBoutiqueId(patron);
+      const allLogs = await db.logsSuppression.reverse().sortBy('date');
+      const scopedLogs = allLogs.filter((l) =>
+        l.boutique_id ? l.boutique_id === targetBtqId : l.patron_id === targetBtqId
+      );
+      setLogsList(scopedLogs);
     } catch (err) {
       console.warn('Erreur chargement logs suppressions:', err);
     }
@@ -333,6 +341,8 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
   };
 
   useEffect(() => {
+    const viewingOwnRow = activeBoutiqueId === patron.id;
+    setRemoteSolde(viewingOwnRow && typeof patron.solde === 'number' ? patron.solde : null);
     setRemoteVentes(null);
     setRemoteCredits(null);
     setRemoteDepenses(null);
@@ -375,15 +385,25 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
   }, [patron.id, activeBoutiqueId]);
 
   useEffect(() => {
-    if (typeof patron.solde === 'number') {
+    if (activeBoutiqueId === patron.id && typeof patron.solde === 'number') {
       setRemoteSolde(patron.solde);
     }
-  }, [patron.solde]);
+  }, [patron.solde, patron.id, activeBoutiqueId]);
 
-  // RÈGLE #2 : Source de vérité = Supabase si données reçues, sinon cache local de l'application
-  const effectiveVentes = (remoteVentes && remoteVentes.length > 0) ? remoteVentes : ventes;
-  const effectiveCredits = (remoteCredits && remoteCredits.length > 0) ? remoteCredits : credits;
-  const effectiveDepenses = (remoteDepenses && remoteDepenses.length > 0) ? remoteDepenses : depenses;
+  // RÈGLE #2 : Source de vérité = Supabase scopé à boutique_id si données reçues, sinon cache local filtré par boutique_id
+  const localScopedVentes = ventes.filter((v) =>
+    v.boutique_id ? v.boutique_id === activeBoutiqueId : v.patron_id === activeBoutiqueId
+  );
+  const localScopedCredits = credits.filter((c) =>
+    c.boutique_id ? c.boutique_id === activeBoutiqueId : c.patron_id === activeBoutiqueId
+  );
+  const localScopedDepenses = depenses.filter((d) =>
+    d.boutique_id ? d.boutique_id === activeBoutiqueId : d.patron_id === activeBoutiqueId
+  );
+
+  const effectiveVentes = remoteVentes !== null ? remoteVentes : localScopedVentes;
+  const effectiveCredits = remoteCredits !== null ? remoteCredits : localScopedCredits;
+  const effectiveDepenses = remoteDepenses !== null ? remoteDepenses : localScopedDepenses;
 
   // Ventes actives (non supprimées)
   const activeVentes = effectiveVentes.filter(
@@ -535,35 +555,35 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
             console.warn('[MonArgent] Erreur upsert depenses:', resDep?.error);
           }
 
-          // Déduire automatiquement le montant de la dépense du Solde en Supabase
+          // CAISSE INDÉPENDANTE : Déduire uniquement du solde de currentBtqId (jamais la boutique principale depuis Boutique 2/3)
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
             .eq('id', currentBtqId)
             .maybeSingle();
-          let currentSolde = Number(btqData?.solde);
+          let currentSolde = btqData?.solde !== null && btqData?.solde !== undefined && !isNaN(Number(btqData.solde))
+            ? Number(btqData.solde)
+            : NaN;
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
               .eq('id', currentBtqId)
               .maybeSingle();
-            currentSolde = Number(pData?.solde) || 0;
+            currentSolde = pData?.solde !== null && pData?.solde !== undefined && !isNaN(Number(pData.solde))
+              ? Number(pData.solde)
+              : 0;
           }
           const updatedSolde = Math.max(0, currentSolde - montant);
           await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', currentBtqId);
           await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', currentBtqId);
-          if (resolvedMainId && resolvedMainId !== currentBtqId) {
-            try {
-              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', resolvedMainId).maybeSingle();
-              const mainSolde = Math.max(0, (Number(mainBtq?.solde) || 0) - montant);
-              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', resolvedMainId);
-            } catch {}
-          }
           setRemoteSolde(updatedSolde);
           patron.solde = updatedSolde;
           try {
-            await db.patrons.update(patron.id, { solde: updatedSolde });
+            await db.patrons.update(currentBtqId, { solde: updatedSolde });
+            if (patron.id !== currentBtqId) {
+              await db.patrons.update(patron.id, { solde: updatedSolde });
+            }
           } catch {}
         } catch (e) {
           console.error('[MonArgent] Erreur Supabase depenses:', e);
@@ -712,35 +732,35 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
             }
           } catch {}
 
-          // Remboursement crédit = argent qui entre en caisse -> Solde +
+          // CAISSE INDÉPENDANTE : Remboursement crédit = argent qui entre uniquement dans la caisse de currentBtqId
           const { data: btqData } = await supabase
             .from('boutiques')
             .select('solde')
             .eq('id', currentBtqId)
             .maybeSingle();
-          let currentSolde = Number(btqData?.solde);
+          let currentSolde = btqData?.solde !== null && btqData?.solde !== undefined && !isNaN(Number(btqData.solde))
+            ? Number(btqData.solde)
+            : NaN;
           if (isNaN(currentSolde)) {
             const { data: pData } = await supabase
               .from('patrons')
               .select('solde')
               .eq('id', currentBtqId)
               .maybeSingle();
-            currentSolde = Number(pData?.solde) || 0;
+            currentSolde = pData?.solde !== null && pData?.solde !== undefined && !isNaN(Number(pData.solde))
+              ? Number(pData.solde)
+              : 0;
           }
           const updatedSolde = currentSolde + montantPaye;
           await supabase.from('boutiques').update({ solde: updatedSolde }).eq('id', currentBtqId);
           await supabase.from('patrons').update({ solde: updatedSolde }).eq('id', currentBtqId);
-          if (resolvedMainId && resolvedMainId !== currentBtqId) {
-            try {
-              const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', resolvedMainId).maybeSingle();
-              const mainSolde = (Number(mainBtq?.solde) || 0) + montantPaye;
-              await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', resolvedMainId);
-            } catch {}
-          }
           setRemoteSolde(updatedSolde);
           patron.solde = updatedSolde;
           try {
-            await db.patrons.update(patron.id, { solde: updatedSolde });
+            await db.patrons.update(currentBtqId, { solde: updatedSolde });
+            if (patron.id !== currentBtqId) {
+              await db.patrons.update(patron.id, { solde: updatedSolde });
+            }
           } catch {}
         } catch (cErr) {
           console.error('[MonArgent] Erreur remboursement credit Supabase:', cErr);
@@ -791,21 +811,25 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
 
     const vente = selectedVenteToDelete;
     const nowIso = new Date().toISOString();
+    const currentBtqId = getActiveBoutiqueId(patron);
+    const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
 
     try {
-      // 1. UPDATE de la vente et suppression dans la table transactions
+      // 1. UPDATE de la vente et suppression dans la table transactions (scopés strictement à boutique_id)
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         try {
           await supabase
             .from('transactions')
             .delete()
-            .eq('id', vente.id);
+            .eq('id', vente.id)
+            .eq('boutique_id', currentBtqId);
 
           try {
             await supabase
               .from('ventes')
               .update({ status: 'supprimée', is_deleted: true })
-              .eq('id', vente.id);
+              .eq('id', vente.id)
+              .eq('boutique_id', currentBtqId);
           } catch {}
         } catch (delErr) {
           console.error('[MonArgent] Erreur Supabase suppression transaction vente:', delErr);
@@ -821,7 +845,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
         try {
           const { data: remoteProd } = await supabase
             .from('produits')
-            .select('stock_qte')
+            .select('stock_qte, boutique_id')
             .eq('id', vente.produit_id)
             .maybeSingle();
 
@@ -829,10 +853,14 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
             currentStock = remoteProd.stock_qte;
           }
           const restoredStock = currentStock + (vente.qte || 1);
-          await supabase
+          let updProd = supabase
             .from('produits')
             .update({ stock_qte: restoredStock })
             .eq('id', vente.produit_id);
+          if (remoteProd?.boutique_id) {
+            updProd = updProd.eq('boutique_id', currentBtqId);
+          }
+          await updProd;
 
           await db.produits.update(vente.produit_id, { stock_qte: restoredStock });
         } catch (stkErr) {
@@ -851,8 +879,6 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       }
 
       // 4. Si crédit associé, supprimer SEULEMENT cette ligne-là (id + boutique_id), JAMAIS par patron_id ou client_nom seul
-      const currentBtqId = getActiveBoutiqueId(patron);
-      const resolvedMainId = (await resolveMainPatronId(patron)) || mainStoreId;
 
       let matchedCredit: any = null;
       if (vente.est_credit) {
@@ -975,6 +1001,7 @@ export const MonArgentScreen: React.FC<MonArgentScreenProps> = ({
       const logEntry: LogSuppression = {
         id: generatePrefixedId('log'),
         patron_id: resolvedMainId,
+        boutique_id: currentBtqId,
         vente_id: vente.id,
         ticket_id: vente.ticket_id,
         produit_nom: vente.produit_nom,

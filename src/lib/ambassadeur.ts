@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { db } from './db';
 import type { ReferralLogRecord } from './types';
 import { safeSupabaseWrite, resolveMainPatronId } from './supabaseHelper';
 
@@ -48,6 +49,115 @@ export interface ReferralBonusResult {
   parrainNom?: string;
   parrainCode?: string;
   bonusDays?: number;
+}
+
+export interface PreservedParrainBonusPlan {
+  newEndIso: string;
+  preservedPlan: string;
+  preservedSubStatus: 'trial' | 'populaire' | 'pro';
+  isPro: boolean;
+  isPopulaire: boolean;
+  baseEndIso: string;
+}
+
+/**
+ * Calcule la nouvelle date (+60j) et PRÉSERVE strictement le forfait actif du parrain
+ * (POPULAIRE reste POPULAIRE, PRO reste PRO — ne jamais repasser en essai 21j).
+ */
+export function computePreservedParrainBonusUpdate(params: {
+  boutiquesRow?: Record<string, any> | null;
+  patronsRow?: Record<string, any> | null;
+  now?: Date;
+}): PreservedParrainBonusPlan {
+  const { boutiquesRow, patronsRow } = params;
+  const now = params.now || new Date();
+
+  const candidateEnds = [
+    boutiquesRow?.subscription_end_date,
+    boutiquesRow?.subscription_end,
+    boutiquesRow?.fin_abonnement,
+    patronsRow?.subscription_end_date,
+    patronsRow?.subscription_end,
+    patronsRow?.fin_abonnement,
+    patronsRow?.abonnement_expire,
+  ];
+
+  let baseDate = now;
+  for (const rawEnd of candidateEnds) {
+    if (!rawEnd) continue;
+    const d = new Date(rawEnd);
+    if (!isNaN(d.getTime()) && d > baseDate) {
+      baseDate = d;
+    }
+  }
+
+  const newEnd = new Date(baseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
+
+  const planCandidates = [
+    boutiquesRow?.plan,
+    boutiquesRow?.forfait,
+    patronsRow?.plan,
+    patronsRow?.forfait,
+    patronsRow?.subscription_status,
+  ]
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter(Boolean);
+
+  const rawMatchedPaid = planCandidates.find((p) => {
+    const low = p.toLowerCase();
+    return low !== 'essai' && low !== 'trial' && low !== 'expired';
+  });
+
+  const amountCandidates = [
+    Number(boutiquesRow?.last_payment_amount) || 0,
+    Number(patronsRow?.last_payment_amount) || 0,
+  ];
+  const maxAmt = Math.max(...amountCandidates, 0);
+
+  const rawLower = (rawMatchedPaid || planCandidates[0] || '').toLowerCase();
+
+  let isPopulaire =
+    rawLower.includes('populaire') ||
+    rawLower.includes('16500') ||
+    rawLower.includes('prolonge') ||
+    (maxAmt === 16500 && !rawLower.includes('pro'));
+
+  let isPro =
+    !isPopulaire &&
+    (rawLower === 'pro' ||
+      rawLower.startsWith('pro_') ||
+      (rawLower.includes('pro') && !rawLower.includes('prolonge')) ||
+      boutiquesRow?.isProActive === true ||
+      patronsRow?.isProActive === true ||
+      maxAmt >= 50000);
+
+  // Double sécurité : si rawMatchedPaid indique explicitement pro_* mais sans 16500
+  if (rawLower.startsWith('pro_') || rawLower === 'pro') {
+    isPro = true;
+    isPopulaire = false;
+  }
+
+  let preservedPlan = 'essai';
+  let preservedSubStatus: 'trial' | 'populaire' | 'pro' = 'trial';
+
+  if (isPopulaire) {
+    preservedPlan = rawMatchedPaid && rawMatchedPaid.toLowerCase().includes('populaire') ? rawMatchedPaid : 'populaire';
+    preservedSubStatus = 'populaire';
+  } else if (isPro) {
+    preservedPlan = rawMatchedPaid && rawMatchedPaid.toLowerCase().includes('pro') && !rawMatchedPaid.toLowerCase().includes('prolonge')
+      ? rawMatchedPaid
+      : 'pro';
+    preservedSubStatus = 'pro';
+  }
+
+  return {
+    baseEndIso: baseDate.toISOString(),
+    newEndIso: newEnd.toISOString(),
+    preservedPlan,
+    preservedSubStatus,
+    isPro,
+    isPopulaire,
+  };
 }
 
 export interface CentralReferralRow {
@@ -261,19 +371,37 @@ export async function checkAndGiveReferralBonus(filleul: {
     }
 
     // 5. CALCUL EXTENSION +60 JOURS (2 MOIS) POUR LE PARRAIN SEUL (jamais le filleul)
+    // Lire BOTH `boutiques` ET `patrons` du patron principal pour préserver le vrai plan et la vraie date max
+    let parrainBtqRow: any = parrain?.nom_boutique ? parrain : null;
+    let parrainPatRow: any = parrain?.abonnement_expire || parrain?.forfait ? parrain : null;
+
+    try {
+      const { data: freshBtq } = await supabase
+        .from('boutiques')
+        .select('*')
+        .eq('id', mainParrainId)
+        .maybeSingle();
+      if (freshBtq) parrainBtqRow = freshBtq;
+    } catch {}
+
+    try {
+      const { data: freshPat } = await supabase
+        .from('patrons')
+        .select('*')
+        .eq('id', mainParrainId)
+        .maybeSingle();
+      if (freshPat) parrainPatRow = freshPat;
+    } catch {}
+
     const now = new Date();
-    const parrainRawEnd = parrain.subscription_end_date || parrain.subscription_end || parrain.fin_abonnement;
-    let parrainBaseDate = now;
-    if (parrainRawEnd) {
-      const d = new Date(parrainRawEnd);
-      if (!isNaN(d.getTime()) && d > now) {
-        parrainBaseDate = d;
-      }
-    }
-    const parrainNewEnd = new Date(parrainBaseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
-    const parrainNewEndIso = parrainNewEnd.toISOString();
-    const newReferralsCount = (Number(parrain.referrals_count) || 0) + 1;
-    const newBonusDays = (Number(parrain.bonus_days_earned) || 0) + 60;
+    const parrainBonusPlan = computePreservedParrainBonusUpdate({
+      boutiquesRow: parrainBtqRow || parrain,
+      patronsRow: parrainPatRow || parrain,
+      now,
+    });
+    const parrainNewEndIso = parrainBonusPlan.newEndIso;
+    const newReferralsCount = (Number(parrainBtqRow?.referrals_count ?? parrainPatRow?.referrals_count ?? parrain.referrals_count) || 0) + 1;
+    const newBonusDays = (Number(parrainBtqRow?.bonus_days_earned ?? parrainPatRow?.bonus_days_earned ?? parrain.bonus_days_earned) || 0) + 60;
 
     // 6. METTRE À JOUR SUPABASE (Table centrale referrals + parrainage UNIQUE par filleul_id principal)
     try {
@@ -335,27 +463,35 @@ export async function checkAndGiveReferralBonus(filleul: {
       console.warn('[Ambassadeur] Update referrals table:', refErr);
     }
 
-    // 7. METTRE À JOUR PARRAIN SEUL (+60 JOURS) DANS BOUTIQUES, PROFILES, PATRONS
+    // 7. METTRE À JOUR PARRAIN SEUL (+60 JOURS) DANS BOUTIQUES, PROFILES, PATRONS EN PRÉSERVANT SON FORFAIT
     try {
-      const parrainPlanRaw = (parrain.plan || '').toLowerCase();
-      // Si parrain est PRO ou POPULAIRE, il GARDE son plan (ne jamais transformer Populaire en Pro, ni prolonge en Pro)
-      const preservedParrainPlan = parrainPlanRaw.includes('populaire') || parrainPlanRaw.includes('16500') || parrainPlanRaw.includes('prolonge')
-        ? 'populaire'
-        : (parrainPlanRaw.includes('pro') && !parrainPlanRaw.includes('prolonge'))
-        ? (parrain.plan || 'pro')
-        : parrainPlanRaw || 'essai';
+      await safeSupabaseWrite('boutiques', 'update', {
+        subscription_end: parrainNewEndIso,
+        subscription_end_date: parrainNewEndIso,
+        plan: parrainBonusPlan.preservedPlan,
+        is_active: true,
+        status: 'active',
+        referrals_count: newReferralsCount,
+        bonus_days_earned: newBonusDays,
+        updated_at: new Date().toISOString(),
+      }, { column: 'id', value: mainParrainId });
 
-      await supabase
-        .from('boutiques')
-        .update({
-          subscription_end: parrainNewEndIso,
-          subscription_end_date: parrainNewEndIso,
-          plan: preservedParrainPlan,
-          is_active: true,
-          status: 'active',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', mainParrainId);
+      // Si PRO, propager la nouvelle date d'expiration aux boutiques secondaires du parrain
+      if (parrainBonusPlan.isPro) {
+        try {
+          await supabase
+            .from('boutiques')
+            .update({
+              subscription_end: parrainNewEndIso,
+              subscription_end_date: parrainNewEndIso,
+              plan: parrainBonusPlan.preservedPlan,
+              is_active: true,
+              status: 'active',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('patron_id', mainParrainId);
+        } catch {}
+      }
     } catch (e) {}
 
     try {
@@ -368,20 +504,37 @@ export async function checkAndGiveReferralBonus(filleul: {
     } catch (e) {}
 
     try {
-      await supabase
-        .from('patrons')
-        .update({
-          subscription_end: parrainNewEndIso,
-          subscription_end_date: parrainNewEndIso,
-          fin_abonnement: parrainNewEndIso,
-          abonnement_expire: parrainNewEndIso,
-          referrals_count: newReferralsCount,
-          bonus_days_earned: newBonusDays,
-          is_active: true,
-          statut: 'ACTIF',
-        } as any)
-        .eq('id', mainParrainId);
+      await safeSupabaseWrite('patrons', 'update', {
+        subscription_end: parrainNewEndIso,
+        subscription_end_date: parrainNewEndIso,
+        fin_abonnement: parrainNewEndIso,
+        abonnement_expire: parrainNewEndIso,
+        subscription_status: parrainBonusPlan.preservedSubStatus,
+        plan: parrainBonusPlan.preservedPlan,
+        forfait: parrainBonusPlan.preservedPlan,
+        referrals_count: newReferralsCount,
+        bonus_days_earned: newBonusDays,
+        is_active: true,
+        statut: 'ACTIF',
+      }, { column: 'id', value: mainParrainId });
     } catch (e) {}
+
+    // Synchroniser aussi le cache Dexie local si le parrain est connecté sur cet appareil
+    try {
+      const localParrain = await db.patrons.get(mainParrainId);
+      if (localParrain) {
+        await db.patrons.update(mainParrainId, {
+          subscription_end_date: parrainNewEndIso,
+          abonnement_expire: parrainNewEndIso,
+          fin_abonnement: parrainNewEndIso,
+          subscription_status: parrainBonusPlan.preservedSubStatus,
+          current_plan: parrainBonusPlan.preservedSubStatus,
+          forfait: parrainBonusPlan.preservedPlan,
+          isProActive: parrainBonusPlan.isPro,
+          statut: 'ACTIF',
+        });
+      }
+    } catch {}
 
     // 8. MARQUER LE FILLEUL COMME AYANT DÉJÀ DÉCLENCHÉ SON BONUS (SANS PROLONGER SA DATE DE FIN !)
     // Le filleul paye 11 mois au lieu de 12 — le bonus +60 jours va au PARRAIN SEUL.

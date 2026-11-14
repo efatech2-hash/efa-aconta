@@ -33,6 +33,8 @@ import {
   ensurePatronExistsInSupabase,
   resolveMainPatronId,
   buildCreditSupabasePayload,
+  atomicDecrementProductStock,
+  restoreProductStock,
 } from '../lib/supabaseHelper';
 
 interface VendreScreenProps {
@@ -65,6 +67,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isBlockedUser, setIsBlockedUser] = useState<boolean>(false);
+  const [saleError, setSaleError] = useState<string | null>(null);
 
   // Vérification si employé bloqué ou supprimé
   useEffect(() => {
@@ -294,6 +297,7 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
       }
     }
 
+    setSaleError(null);
     setIsLoading(true);
 
     const ticketId = generatePrefixedId('tck');
@@ -310,7 +314,54 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
       await ensurePatronExistsInSupabase(mainPatronId, patron);
     }
 
+    const reservedStockItems: Array<{ productId: string; qty: number; newStock: number; offlineQueued?: boolean }> = [];
+
     try {
+      // PHASE 1 : RÉSERVATION ATOMIQUE DU STOCK POUR TOUS LES ARTICLES AVANT TOUTE VENTE OU CAISSE
+      // Empêche 2 vendeurs simultanés de vendre le dernier article en double
+      const confirmedStockMap = new Map<string, { newStock: number; offlineQueued?: boolean }>();
+      for (const item of cart) {
+        const resStock = await atomicDecrementProductStock({
+          productId: item.produit_id,
+          boutiqueId: activeBoutiqueId,
+          qty: item.qte,
+          productName: item.produit_nom,
+        });
+
+        if (!resStock.success) {
+          // Rollback des articles déjà réservés dans ce même panier
+          for (const prev of reservedStockItems) {
+            await restoreProductStock({
+              productId: prev.productId,
+              boutiqueId: activeBoutiqueId,
+              qty: prev.qty,
+            });
+          }
+          const errMsg = resStock.error || `Stock insuffisant pour ${item.produit_nom}.`;
+          setSaleError(errMsg);
+          speakFrench(errMsg);
+          try {
+            onSaleCompleted();
+          } catch {}
+          return;
+        }
+
+        const confirmedNewStock = typeof resStock.newStock === 'number'
+          ? resStock.newStock
+          : Math.max(0, (products.find((p) => p.id === item.produit_id)?.stock_qte ?? 0) - item.qte);
+
+        reservedStockItems.push({
+          productId: item.produit_id,
+          qty: item.qte,
+          newStock: confirmedNewStock,
+          offlineQueued: resStock.offlineQueued,
+        });
+        confirmedStockMap.set(item.produit_id, {
+          newStock: confirmedNewStock,
+          offlineQueued: resStock.offlineQueued,
+        });
+      }
+
       let firstVenteId = '';
       let remainingCreditToAssign = parsedReste;
 
@@ -354,9 +405,10 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           items: cart,
         };
 
-        // Calcul du nouveau stock
+        // Stock déjà décrémenté atomiquement en Phase 1
         const currentProd = products.find((p) => p.id === item.produit_id);
-        const newStock = Math.max(0, (currentProd?.stock_qte ?? 0) - item.qte);
+        const stockMeta = confirmedStockMap.get(item.produit_id);
+        const newStock = stockMeta?.newStock ?? Math.max(0, (currentProd?.stock_qte ?? 0) - item.qte);
 
         let onlineSaved = false;
 
@@ -403,14 +455,9 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           date: nowIso,
         };
 
-        // A. Mise à jour DIRECTE dans Supabase table 'produits' & 'transactions' (avec upsert anti-409)
+        // A. Sauvegarde DIRECTE dans Supabase 'transactions' & 'ventes' (le stock a déjà été verrouillé atomiquement)
         if (isOnline) {
           try {
-            await supabase
-              .from('produits')
-              .update({ stock_qte: newStock })
-              .eq('id', item.produit_id);
-
             // UPSERT table transactions (onConflict: 'id')
             let resTx: any = await supabase
               .from('transactions')
@@ -449,7 +496,9 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           saleRecord.synced = false;
           await queueSyncItem('ventes', 'insert', venteId, rowVente);
           await queueSyncItem('transactions', 'insert', venteId, rowTransaction);
-          await queueSyncItem('produits', 'update', item.produit_id, { stock_qte: newStock });
+          if (stockMeta?.offlineQueued || !isOnline) {
+            await queueSyncItem('produits', 'update', item.produit_id, { stock_qte: newStock });
+          }
         } else {
           saleRecord.synced = true;
         }
@@ -523,47 +572,43 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
         await db.credits.put(creditRecord);
       }
 
-      // 3. Mise à jour DIRECTE du solde caisse dans Supabase (seule la partie payée entre en caisse, jamais le crédit impayé)
+      // 3. CAISSE INDÉPENDANTE : Mise à jour STRICTEMENT du solde de activeBoutiqueId (jamais la boutique principale depuis Boutique 2/3)
       const montantEntreEnCaisse = creditMode ? Math.max(0, totalGeneral - parsedReste) : totalGeneral;
       if (montantEntreEnCaisse > 0) {
         let finalNewSolde = (Number(patron.solde) || 0) + montantEntreEnCaisse;
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            // Mise à jour de la boutique active (Boutique 1 ou 2 ou 3)
             const { data: btqData } = await supabase
               .from('boutiques')
               .select('solde')
               .eq('id', activeBoutiqueId)
               .maybeSingle();
-            let currentSolde = Number(btqData?.solde);
+            let currentSolde = btqData?.solde !== null && btqData?.solde !== undefined && !isNaN(Number(btqData.solde))
+              ? Number(btqData.solde)
+              : NaN;
             if (isNaN(currentSolde)) {
               const { data: pData } = await supabase
                 .from('patrons')
                 .select('solde')
                 .eq('id', activeBoutiqueId)
                 .maybeSingle();
-              currentSolde = Number(pData?.solde) || 0;
+              currentSolde = pData?.solde !== null && pData?.solde !== undefined && !isNaN(Number(pData.solde))
+                ? Number(pData.solde)
+                : 0;
             }
             finalNewSolde = currentSolde + montantEntreEnCaisse;
             await supabase.from('boutiques').update({ solde: finalNewSolde }).eq('id', activeBoutiqueId);
             await supabase.from('patrons').update({ solde: finalNewSolde }).eq('id', activeBoutiqueId);
-
-            // Si boutique active est une sous-boutique, mettre également à jour la boutique principale
-            if (mainPatronId && mainPatronId !== activeBoutiqueId) {
-              try {
-                const { data: mainBtq } = await supabase.from('boutiques').select('solde').eq('id', mainPatronId).maybeSingle();
-                const mainSolde = (Number(mainBtq?.solde) || 0) + montantEntreEnCaisse;
-                await supabase.from('boutiques').update({ solde: mainSolde }).eq('id', mainPatronId);
-                await supabase.from('patrons').update({ solde: mainSolde }).eq('id', mainPatronId);
-              } catch {}
-            }
           } catch (sErr) {
             console.warn('[VendreScreen] Note mise à jour solde caisse Supabase:', sErr);
           }
         }
         patron.solde = finalNewSolde;
         try {
-          await db.patrons.update(patron.id, { solde: finalNewSolde });
+          await db.patrons.update(activeBoutiqueId, { solde: finalNewSolde });
+          if (patron.id !== activeBoutiqueId) {
+            await db.patrons.update(patron.id, { solde: finalNewSolde });
+          }
         } catch {}
       }
 
@@ -657,6 +702,23 @@ export const VendreScreen: React.FC<VendreScreenProps> = ({
           <span className="text-[10px] bg-red-700/80 px-2 py-0.5 rounded-full font-black">
             Vente interdite
           </span>
+        </div>
+      )}
+
+      {/* Alerte Stock insuffisant / vente concurrente refusée */}
+      {saleError && (
+        <div className="p-3.5 px-4 rounded-2xl bg-red-50 text-red-800 font-bold text-xs sm:text-sm flex items-center justify-between gap-2 shadow-sm border-2 border-red-300 animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            <span>{saleError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSaleError(null)}
+            className="text-xs font-black text-red-700 underline flex-shrink-0"
+          >
+            Fermer
+          </button>
         </div>
       )}
 
